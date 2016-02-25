@@ -4,7 +4,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hbase.client._
 import org.apache.hadoop.hbase.util.Bytes
 import com.typesafe.config._
-import org.apache.hadoop.hbase.{HColumnDescriptor, HTableDescriptor}
+import org.apache.hadoop.hbase.{ HColumnDescriptor, HTableDescriptor }
 
 object HBaseJournalInit {
 
@@ -84,7 +84,6 @@ object HBaseJournalInit {
       true
     }
   }
-  
 
   /**
    * Construct Configuration, passing in all `hbase.*` keys from the typesafe Config.

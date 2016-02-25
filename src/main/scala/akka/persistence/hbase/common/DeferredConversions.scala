@@ -1,7 +1,7 @@
 package akka.persistence.hbase.common
 
 import com.stumbleupon.async._
-import scala.concurrent.{ExecutionContext, Promise, Future}
+import scala.concurrent.{ ExecutionContext, Promise, Future }
 
 trait DeferredConversions {
 
@@ -14,11 +14,11 @@ trait DeferredConversions {
   implicit def deferred2future[T <: AnyRef](deferred: Deferred[T]): Future[T] = {
     val p = Promise[T]()
 
-    val onSuccess = new Callback[AnyRef, T]{
+    val onSuccess = new Callback[AnyRef, T] {
       def call(in: T) = p.success(in)
     }
 
-    val onError = new Callback[Any, Exception]{
+    val onError = new Callback[Any, Exception] {
       def call(ex: Exception) = p.failure(ex)
     }
 

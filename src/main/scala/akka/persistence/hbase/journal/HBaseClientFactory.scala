@@ -19,8 +19,7 @@ object HBaseClientFactory {
     val maxBatchSize = List(
       persistenceSettings.journal.maxMessageBatchSize,
       persistenceSettings.journal.maxConfirmationBatchSize,
-      persistenceSettings.journal.maxDeletionBatchSize
-    ).max.toShort
+      persistenceSettings.journal.maxDeletionBatchSize).max.toShort
 
     val hbaseClient = client.get()
     hbaseClient.setFlushInterval(maxBatchSize)

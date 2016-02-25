@@ -77,7 +77,6 @@ object RowKey {
     Bytes.toString(num).toLong
   }
 
-
   /** INTERNAL API */
   @tailrec private[hbase] def lastSeqNrInPartition(p: Long, i: Long = Long.MaxValue): Long = if (i % p == 0) i else lastSeqNrInPartition(p, i - 1)
 

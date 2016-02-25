@@ -1,13 +1,13 @@
 package akka.persistence.hbase.common
 
-import java.{util => ju}
+import java.{ util => ju }
 
 import akka.persistence.hbase.journal.PersistencePluginSettings
 import akka.persistence.hbase.journal.RowTypeMarkers._
 import org.apache.hadoop.hbase.util.Bytes
-import org.hbase.async.{DeleteRequest, HBaseClient, KeyValue, PutRequest}
+import org.hbase.async.{ DeleteRequest, HBaseClient, KeyValue, PutRequest }
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ ExecutionContext, Future }
 
 trait AsyncBaseUtils {
 
@@ -17,7 +17,7 @@ trait AsyncBaseUtils {
 
   def table: String
   lazy val tableBytes = Bytes.toBytes(table)
-  
+
   def family: String
   lazy val familyBytes = Bytes.toBytes(family)
 
@@ -39,12 +39,12 @@ trait AsyncBaseUtils {
     }
 
   protected def deleteRow(key: Array[Byte]): Future[Unit] = {
-//      println(s"Permanently deleting row: ${Bytes.toString(key)}")
+    //      println(s"Permanently deleting row: ${Bytes.toString(key)}")
     executeDelete(key)
   }
 
   protected def markRowAsDeleted(key: Array[Byte]): Future[Unit] = {
-//      println(s"Marking as deleted, for row: ${Bytes.toString(key)}")
+    //      println(s"Marking as deleted, for row: ${Bytes.toString(key)}")
     executePut(key, Array(Marker), Array(DeletedMarkerBytes))
   }
 
@@ -70,5 +70,5 @@ trait AsyncBaseUtils {
     scanner.setFamily(familyBytes)
     scanner
   }
-  
+
 }

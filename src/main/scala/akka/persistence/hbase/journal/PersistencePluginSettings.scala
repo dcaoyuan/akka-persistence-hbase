@@ -26,8 +26,7 @@ case class PersistencePluginSettings(
   snapshotTable: String,
   snapshotFamily: String,
   snapshotHdfsDir: String,
-  hadoopConfiguration: Configuration
-)
+  hadoopConfiguration: Configuration)
 
 object PersistencePluginSettings {
   def apply(rootConfig: Config): PersistencePluginSettings = {
@@ -35,19 +34,18 @@ object PersistencePluginSettings {
     val snapshotConfig = rootConfig.getConfig("hadoop-snapshot-store")
 
     PersistencePluginSettings(
-      zookeeperQuorum      = journalConfig.getString("hadoop-pass-through.hbase.zookeeper.quorum"),
-      zookeeperParent      = journalConfig.getString("hadoop-pass-through.zookeeper.znode.parent"),
-      table                = journalConfig.getString("table"),
-      family               = journalConfig.getString("family"),
-      partitionCount       = journalConfig.getInt("partition.count"),
-      scanBatchSize        = journalConfig.getInt("scan-batch-size"),
-      pluginDispatcherId   = journalConfig.getString("plugin-dispatcher"),
-      replayDispatcherId   = journalConfig.getString("replay-dispatcher"),
+      zookeeperQuorum = journalConfig.getString("hadoop-pass-through.hbase.zookeeper.quorum"),
+      zookeeperParent = journalConfig.getString("hadoop-pass-through.zookeeper.znode.parent"),
+      table = journalConfig.getString("table"),
+      family = journalConfig.getString("family"),
+      partitionCount = journalConfig.getInt("partition.count"),
+      scanBatchSize = journalConfig.getInt("scan-batch-size"),
+      pluginDispatcherId = journalConfig.getString("plugin-dispatcher"),
+      replayDispatcherId = journalConfig.getString("replay-dispatcher"),
       publishTestingEvents = journalConfig.getBoolean("publish-testing-events"),
-      snapshotTable        = snapshotConfig.getString("hbase.table"),
-      snapshotFamily       = snapshotConfig.getString("hbase.family"),
-      snapshotHdfsDir      = snapshotConfig.getString("snapshot-dir"),
-      hadoopConfiguration  = if (rootConfig ne null) HBaseJournalInit.getHBaseConfig(rootConfig) else null
-    )
+      snapshotTable = snapshotConfig.getString("hbase.table"),
+      snapshotFamily = snapshotConfig.getString("hbase.family"),
+      snapshotHdfsDir = snapshotConfig.getString("snapshot-dir"),
+      hadoopConfiguration = if (rootConfig ne null) HBaseJournalInit.getHBaseConfig(rootConfig) else null)
   }
 }

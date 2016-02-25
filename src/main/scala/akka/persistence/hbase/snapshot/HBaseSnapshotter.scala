@@ -1,27 +1,27 @@
 package akka.persistence.hbase.snapshot
 
-import java.util.{ArrayList => JArrayList}
+import java.util.{ ArrayList => JArrayList }
 
 import akka.actor.ActorSystem
 import akka.persistence.hbase.common.TestingEventProtocol.DeletedSnapshotsFor
 import akka.persistence.hbase.common._
 import akka.persistence.hbase.journal._
 import akka.persistence.serialization.Snapshot
-import akka.persistence.{SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria}
+import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria }
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.client.HTable
 import org.apache.hadoop.hbase.util.Bytes
-import org.hbase.async.{HBaseClient, KeyValue}
+import org.hbase.async.{ HBaseClient, KeyValue }
 
 import scala.collection.JavaConverters._
 import scala.collection.immutable
 import scala.concurrent.Future
-import scala.util.{Failure, Success}
+import scala.util.{ Failure, Success }
 
 class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: PersistencePluginSettings, val client: HBaseClient)
-  extends HadoopSnapshotter
-  with HBaseUtils with AsyncBaseUtils with HBaseSerialization
-  with DeferredConversions {
+    extends HadoopSnapshotter
+    with HBaseUtils with AsyncBaseUtils with HBaseSerialization
+    with DeferredConversions {
 
   val log = system.log
 
@@ -89,9 +89,8 @@ class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: Pe
       case Success(serializedSnapshot) =>
         executePut(
           SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes,
-          Array(Marker,              Message),
-          Array(SnapshotMarkerBytes, serializedSnapshot)
-        )
+          Array(Marker, Message),
+          Array(SnapshotMarkerBytes, serializedSnapshot))
 
       case Failure(ex) =>
         Future failed ex

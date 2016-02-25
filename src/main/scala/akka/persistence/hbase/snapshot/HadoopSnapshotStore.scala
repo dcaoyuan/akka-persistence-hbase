@@ -1,7 +1,7 @@
 package akka.persistence.hbase.snapshot
 
 import akka.persistence.snapshot.SnapshotStore
-import akka.persistence.{SelectedSnapshot, SnapshotSelectionCriteria}
+import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria }
 import scala.concurrent.Future
 import akka.persistence.SnapshotMetadata
 import akka.actor.ActorLogging

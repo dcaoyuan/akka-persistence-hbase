@@ -1,13 +1,13 @@
 package akka.persistence.hbase.journal
 
-import akka.actor.{Actor, ActorLogging, ActorRef, Props}
+import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.persistence.hbase.common._
 import akka.persistence.hbase.journal.Operator.AllOpsSubmitted
 import akka.persistence.journal.AsyncWriteJournal
-import akka.persistence.{PersistenceSettings, PersistentConfirmation, PersistentId, PersistentRepr}
+import akka.persistence.{ PersistenceSettings, PersistentConfirmation, PersistentId, PersistentRepr }
 import akka.serialization.SerializationExtension
 import com.google.common.base.Stopwatch
-import org.apache.hadoop.hbase.client.{HTable, Scan}
+import org.apache.hadoop.hbase.client.{ HTable, Scan }
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
 import org.apache.hadoop.hbase.filter._
 
@@ -20,8 +20,8 @@ import scala.concurrent._
  * Uses AsyncBase to implement asynchronous IPC with HBase.
  */
 class HBaseAsyncWriteJournal extends Actor with ActorLogging
-  with HBaseJournalBase with AsyncWriteJournal
-  with HBaseAsyncRecovery {
+    with HBaseJournalBase with AsyncWriteJournal
+    with HBaseAsyncRecovery {
 
   import akka.persistence.hbase.common.TestingEventProtocol._
   import akka.persistence.hbase.journal.RowTypeMarkers._
@@ -46,7 +46,6 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
 
   implicit override val pluginDispatcher = context.system.dispatchers.lookup(hBasePersistenceSettings.pluginDispatcherId)
 
-
   import akka.persistence.hbase.common.Columns._
   import akka.persistence.hbase.common.DeferredConversions._
   import org.apache.hadoop.hbase.util.Bytes._
@@ -60,18 +59,18 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
     val futures = persistentBatch map { p =>
       import p._
 
-      log.debug("Putting into: {}" , RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString)
+      log.debug("Putting into: {}", RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString)
       executePut(
         RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
-        Array(PersistenceId,          SequenceNr,          Marker,                  Message),
-        Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), persistentToBytes(p))
-      )
+        Array(PersistenceId, SequenceNr, Marker, Message),
+        Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), persistentToBytes(p)))
     }
 
     flushWrites()
-    Future.sequence(futures) map { case _ =>
-      log.debug("Completed writing {} messages (took: {})", persistentBatch.size, watch.stop()) // todo better failure / success?
-      if (publishTestingEvents) context.system.eventStream.publish(FinishedWrites(persistentBatch.size))
+    Future.sequence(futures) map {
+      case _ =>
+        log.debug("Completed writing {} messages (took: {})", persistentBatch.size, watch.stop()) // todo better failure / success?
+        if (publishTestingEvents) context.system.eventStream.publish(FinishedWrites(persistentBatch.size))
     }
   }
 
@@ -85,9 +84,9 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
 
     def scanAndDeletePartition(part: Long, operator: ActorRef): Unit = {
       val stopSequenceNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
-      val startScanKey = RowKey.firstInPartition(persistenceId, part)                 // 021-ID-000000000000000000
+      val startScanKey = RowKey.firstInPartition(persistenceId, part) // 021-ID-000000000000000000
       val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr) // 021-ID-9223372036854775800
-      val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId)           //  .*-ID-.*
+      val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
 
       // we can avoid canning some partitions - guaranteed to be empty for smaller than the partition number seqNrs
       if (part > toSequenceNr)
@@ -125,9 +124,10 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
     val partitionScans = (1 to partitions).map(partitionNr => Future { scanAndDeletePartition(partitionNr, operator) })
     Future.sequence(partitionScans) onComplete { _ => operator ! AllOpsSubmitted }
 
-    deleteRowsPromise.future map { case _ =>
-      log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, permanent: {} (took: {})", persistenceId, toSequenceNr, permanent, watch.stop())
-      if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
+    deleteRowsPromise.future map {
+      case _ =>
+        log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, permanent: {} (took: {})", persistenceId, toSequenceNr, permanent, watch.stop())
+        if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
     }
   }
 
@@ -141,8 +141,9 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
     }
 
     flushWrites()
-    Future.sequence(fs) map { case _ =>
-      log.debug("Completed confirming {} messages (took: {})", confirmations.size, watch.stop()) // todo better failure / success?
+    Future.sequence(fs) map {
+      case _ =>
+        log.debug("Completed confirming {} messages (took: {})", confirmations.size, watch.stop()) // todo better failure / success?
     }
   }
 
@@ -164,14 +165,13 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
   // end of journal plugin api impl ------------------------------------------------------------------------------------
 
   private def confirmAsync(persistenceId: String, sequenceNr: Long, channelId: String): Future[Unit] = {
-      log.debug(s"Confirming async for persistenceId: {}, sequenceNr: {} and channelId: {}", persistenceId, sequenceNr, channelId)
+    log.debug(s"Confirming async for persistenceId: {}, sequenceNr: {} and channelId: {}", persistenceId, sequenceNr, channelId)
 
-      executePut(
-        RowKey(sequenceNr, persistenceId, sequenceNr).toBytes,
-        Array(Marker),
-        Array(confirmedMarkerBytes(channelId))
-      )
-    }
+    executePut(
+      RowKey(sequenceNr, persistenceId, sequenceNr).toBytes,
+      Array(Marker),
+      Array(confirmedMarkerBytes(channelId)))
+  }
 
   private def deleteFunctionFor(permanent: Boolean): (Array[Byte]) => Future[Unit] = {
     if (permanent) deleteRow
@@ -205,7 +205,7 @@ private[hbase] class Operator(finish: Promise[Unit], op: Array[Byte] => Future[U
 
   def receive = {
     case key: Array[Byte] =>
-//      log.debug("Scheduling op on: {}", Bytes.toString(key))
+      //      log.debug("Scheduling op on: {}", Bytes.toString(key))
       totalOps += 1
       op(key) foreach { _ => self ! OpApplied(key) }
 

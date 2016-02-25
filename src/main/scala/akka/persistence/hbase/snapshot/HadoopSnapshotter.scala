@@ -1,8 +1,8 @@
 package akka.persistence.hbase.snapshot
 
-import akka.persistence.{SelectedSnapshot, SnapshotSelectionCriteria, SnapshotMetadata}
+import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria, SnapshotMetadata }
 import scala.concurrent.Future
-import akka.actor.{ActorSystem, Extension}
+import akka.actor.{ ActorSystem, Extension }
 import scala.util.Try
 import akka.persistence.serialization.Snapshot
 import akka.serialization.SerializationExtension
@@ -31,6 +31,5 @@ trait HadoopSnapshotter extends Extension {
 
   protected def serialize(snapshot: Snapshot): Try[Array[Byte]] =
     serialization.serialize(snapshot)
-
 
 }

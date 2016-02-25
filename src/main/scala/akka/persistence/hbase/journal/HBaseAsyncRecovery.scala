@@ -3,17 +3,17 @@ package akka.persistence.hbase.journal
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
-import akka.actor.{Actor, ActorLogging, ActorRef, Props}
+import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.persistence.PersistentRepr
 import akka.persistence.hbase.common.RowKey
 import akka.persistence.hbase.journal.Resequencer.AllPersistentsSubmitted
 import akka.persistence.journal._
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.util.Bytes
-import org.hbase.async.{HBaseClient, KeyValue}
+import org.hbase.async.{ HBaseClient, KeyValue }
 
 import scala.collection.mutable
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{ Future, Promise }
 
 trait HBaseAsyncRecovery extends AsyncRecovery {
   this: Actor with ActorLogging with HBaseAsyncWriteJournal =>
@@ -30,8 +30,7 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
 
   // async recovery plugin impl
 
-  override def asyncReplayMessages(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long, max: Long)
-                                  (replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
+  override def asyncReplayMessages(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long, max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
     case 0 =>
       log.debug("Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
         persistenceId, fromSequenceNr, toSequenceNr)
@@ -94,11 +93,10 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
                   resequenceMsg(persistentRepr)
 
                 case "S" =>
-                  // thanks to treating Snapshot rows as deleted entries, we won't suddenly apply a Snapshot() where the
-                  // our Processor expects a normal message. This is implemented for the HBase backed snapshot storage,
-                  // if you use the HDFS storage there won't be any snapshot entries in here.
-                  // As for message deletes: if we delete msgs up to seqNr 4, and snapshot was at 3, we want to delete it anyway.
-
+                // thanks to treating Snapshot rows as deleted entries, we won't suddenly apply a Snapshot() where the
+                // our Processor expects a normal message. This is implemented for the HBase backed snapshot storage,
+                // if you use the HDFS storage there won't be any snapshot entries in here.
+                // As for message deletes: if we delete msgs up to seqNr 4, and snapshot was at 3, we want to delete it anyway.
 
                 case "D" =>
                   // mark as deleted, journal may choose to replay it
@@ -137,8 +135,9 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
             resequencer ! AllPersistentsSubmitted(assumeSequenceStartsAt = 0)
       }
 
-      reachedSeqNrPromise.future map { case _ =>
-        log.debug("Completed recovery scanning for persistenceId {}", persistenceId)
+      reachedSeqNrPromise.future map {
+        case _ =>
+          log.debug("Completed recovery scanning for persistenceId {}", persistenceId)
       }
   }
 
@@ -152,10 +151,10 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
       val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr) // 021-ID-0000000000000000021
       val toSequenceNr = RowKey.lastSeqNrInPartition(part)
       val stopSequenceNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
-      val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr)   // 021-ID-9223372036854775897
-      val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId)           //  .*-ID-.*
+      val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr) // 021-ID-9223372036854775897
+      val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
 
-//      log.debug("Scanning {} partition, from {} to {}", part, startScanKey.toKeyString, stopScanKey.toKeyString)
+      //      log.debug("Scanning {} partition, from {} to {}", part, startScanKey.toKeyString, stopScanKey.toKeyString)
 
       val scan = preparePartitionScan(tableBytes, familyBytes, startScanKey, stopScanKey, persistenceIdRowRegex, onlyRowKeys = true)
       val scanner = hTable.getScanner(scan)
@@ -179,15 +178,14 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
     val partitionScans = (1 to partitions).map(i => Future { scanPartitionForMaxSeqNr(i) })
     Future.sequence(partitionScans) map {
       case seqNrs if seqNrs.isEmpty => 0L
-      case seqNrs => seqNrs.max
+      case seqNrs                   => seqNrs.max
     } map { seqNr =>
       log.debug("Found highest seqNr for persistenceId: {}, it's: {}", persistenceId, seqNr)
       seqNr
     }
   }
 
-
-//  end of async recovery plugin impl
+  //  end of async recovery plugin impl
 
   private def sequenceNr(columns: mutable.Buffer[KeyValue]): Long = {
     val messageKeyValue = findColumn(columns, Message)
@@ -215,8 +213,7 @@ private[hbase] class Resequencer(
     maxMsgsToSequence: Long,
     replayCallback: PersistentRepr => Unit,
     loopedMaxFlag: AtomicBoolean,
-    reachedSeqNr: Promise[Long]
-  ) extends Actor with ActorLogging {
+    reachedSeqNr: Promise[Long]) extends Actor with ActorLogging {
 
   private lazy val config = context.system.settings.config
 
@@ -232,7 +229,7 @@ private[hbase] class Resequencer(
 
   def receive = {
     case p: PersistentRepr ⇒
-//      log.debug("Resequencing {} from {}; Delivered until {} already", p.payload, p.sequenceNr, deliveredSeqNr)
+      //      log.debug("Resequencing {} from {}; Delivered until {} already", p.payload, p.sequenceNr, deliveredSeqNr)
       resequence(p)
 
     case AllPersistentsSubmitted(assumeSequenceStartsAt) =>
@@ -258,7 +255,7 @@ private[hbase] class Resequencer(
 
     if (p.sequenceNr == deliveredSeqNr + 1) {
       deliveredSeqNr = p.sequenceNr
-//      log.debug("Applying {} @ {}", p.payload, p.sequenceNr)
+      //      log.debug("Applying {} @ {}", p.payload, p.sequenceNr)
       replayCallback(p)
 
       if (deliveredMsgs == maxMsgsToSequence) {
