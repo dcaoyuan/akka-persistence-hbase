@@ -1,4 +1,4 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
 import com.stumbleupon.async._
 import scala.concurrent.{ ExecutionContext, Promise, Future }

@@ -1,13 +1,16 @@
 package akka.persistence.hbase.journal
 
-import akka.persistence.hbase.common.RowKey
+import akka.actor.ActorSystem
+import akka.persistence.hbase.RowKey
 import org.scalatest.{FlatSpec, Matchers}
 
 class RowKeySpec extends FlatSpec with Matchers {
 
   behavior of "RowKey"
 
-  implicit val journalConfig = new PersistencePluginSettings(null, null, null, null, 50, 1, null, null, false, null, null, null, null)
+  val system = ActorSystem("test")
+  implicit val journalConfig = new HBaseJournalConfig(system.settings.config)
+  //implicit val journalConfig = new HBaseJournalConfig(null, null, null, null, 50, 1, null, null, false, null, null, null, null)
 
   it should "find first key in partition" in {
     val rowKeys = for {

@@ -2,7 +2,9 @@ package akka.persistence.hbase.journal
 
 import akka.actor.{ActorLogging, ActorRef, ActorSystem, Props}
 import akka.persistence._
-import akka.persistence.hbase.common.TestingEventProtocol.FinishedDeletes
+import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.TestingEventProtocol.FinishedDeletes
+import akka.persistence.hbase.snapshot.HBaseSnapshotConfig
 import akka.testkit.{ImplicitSender, TestKit, TestProbe}
 import org.scalatest._
 
@@ -17,7 +19,7 @@ object HBaseAsyncJournalSpec {
     val handler: Receive = {
       case DeleteUntil(nr, permanent) =>
         log.debug("Deleting messages until {}, permanent: {}", nr, permanent)
-        deleteMessages(toSequenceNr = nr, permanent)
+        deleteMessages(toSequenceNr = nr)
 
       case RecoveryCompleted => // do nothing...
 
@@ -52,7 +54,8 @@ class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSe
 
   val config = system.settings.config
 
-  val pluginSettings = PersistencePluginSettings(config)
+  val journalConfig = new HBaseJournalConfig(config)
+  val snapshotConfig = new HBaseSnapshotConfig(config)
 
   behavior of "HBaseJournal"
 
@@ -60,8 +63,8 @@ class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSe
 
   override protected def beforeAll() {
     super.beforeAll()
-    HBaseJournalInit.createTable(config, pluginSettings.table, pluginSettings.family)
-    HBaseJournalInit.createTable(config, pluginSettings.snapshotTable, pluginSettings.snapshotFamily)
+    HBaseJournalInit.createTable(config, journalConfig.table, journalConfig.family)
+    HBaseJournalInit.createTable(config, snapshotConfig.snapshotTable, snapshotConfig.snapshotFamily)
 
     Thread.sleep(2000)
   }
@@ -123,7 +126,7 @@ class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSe
     expectMsgAllOf(max = timeout, "b", 2L, true)
   }
 
-  lazy val settings = PersistencePluginSettings(system.settings.config)
+  lazy val settings = new HBaseJournalConfig(system.settings.config)
 
   it should "delete exactly as much as needed messages" in {
     val deleteProbe = TestProbe()
@@ -166,11 +169,11 @@ class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSe
     probe.expectMsgType[FinishedDeletes](max = 10.seconds)
 
   override protected def afterAll() {
-    HBaseJournalInit.disableTable(config, pluginSettings.table)
-    HBaseJournalInit.deleteTable(config, pluginSettings.table)
+    HBaseJournalInit.disableTable(config, journalConfig.table)
+    HBaseJournalInit.deleteTable(config, journalConfig.table)
 
-    HBaseJournalInit.disableTable(config, pluginSettings.snapshotTable)
-    HBaseJournalInit.deleteTable(config, pluginSettings.snapshotTable)
+    HBaseJournalInit.disableTable(config, snapshotConfig.snapshotTable)
+    HBaseJournalInit.deleteTable(config, snapshotConfig.snapshotTable)
 
     HBaseClientFactory.reset()
 

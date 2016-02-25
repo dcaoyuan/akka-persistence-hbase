@@ -2,9 +2,9 @@ package akka.persistence.hbase.snapshot
 
 import akka.persistence.snapshot.SnapshotStore
 import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria }
-import scala.concurrent.Future
 import akka.persistence.SnapshotMetadata
 import akka.actor.ActorLogging
+import scala.concurrent.Future
 
 class HadoopSnapshotStore extends SnapshotStore with ActorLogging {
 
@@ -19,10 +19,10 @@ class HadoopSnapshotStore extends SnapshotStore with ActorLogging {
   def saved(metadata: SnapshotMetadata): Unit =
     snap.saved(metadata)
 
-  def delete(metadata: SnapshotMetadata): Unit =
-    snap.delete(metadata)
+  def deleteAsync(metadata: SnapshotMetadata): Future[Unit] =
+    snap.deleteAsync(metadata)
 
-  def delete(persistenceId: String, criteria: SnapshotSelectionCriteria): Unit =
-    snap.delete(persistenceId, criteria)
+  def deleteAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Unit] =
+    snap.deleteAsync(persistenceId, criteria)
 }
 

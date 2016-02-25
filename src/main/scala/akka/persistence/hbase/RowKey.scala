@@ -1,11 +1,10 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
+import akka.persistence.hbase.journal.HBaseJournalConfig
 import org.apache.hadoop.hbase.util.Bytes
-import akka.persistence.hbase.journal.PersistencePluginSettings
-
 import scala.annotation.tailrec
 
-case class RowKey(part: Long, persistenceId: String, sequenceNr: Long)(implicit val hBasePersistenceSettings: PersistencePluginSettings) {
+case class RowKey(part: Long, persistenceId: String, sequenceNr: Long)(implicit val hBasePersistenceSettings: HBaseJournalConfig) {
 
   def toBytes = Bytes.toBytes(toKeyString)
 
@@ -31,16 +30,16 @@ object RowKey {
    * Since we're salting (prefixing) the entries with selectPartition numbers,
    * we must use this pattern for scanning for "all messages for processorX"
    */
-  def patternForProcessor(persistenceId: String)(implicit journalConfig: PersistencePluginSettings) = s""".*-$persistenceId-.*"""
+  def patternForProcessor(persistenceId: String)(implicit journalConfig: HBaseJournalConfig) = s""".*-$persistenceId-.*"""
 
-  def firstInPartition(persistenceId: String, partition: Long, fromSequenceNr: Long = 0)(implicit journalConfig: PersistencePluginSettings) = {
+  def firstInPartition(persistenceId: String, partition: Long, fromSequenceNr: Long = 0)(implicit journalConfig: HBaseJournalConfig) = {
     require(partition > 0, "partition must be > 0")
     require(partition <= journalConfig.partitionCount, "partition must be <= partitionCount")
 
     RowKey.apply(selectPartition(partition), persistenceId, fromSequenceNr)
   }
 
-  def lastInPartition(persistenceId: String, partition: Long, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: PersistencePluginSettings) = {
+  def lastInPartition(persistenceId: String, partition: Long, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: HBaseJournalConfig) = {
     require(partition > 0, s"partition must be > 0, ($partition)")
     require(partition <= journalConfig.partitionCount, s"partition must be <= partitionCount, ($partition <!= ${journalConfig.partitionCount})")
     require(toSequenceNr >= 0, s"toSequenceNr must be >= 0, ($toSequenceNr)")
@@ -48,7 +47,7 @@ object RowKey {
     new RowKey(selectPartition(partition), persistenceId, toSequenceNr)
   }
 
-  def lastInPartition(persistenceId: String, partition: Long)(implicit journalConfig: PersistencePluginSettings) = {
+  def lastInPartition(persistenceId: String, partition: Long)(implicit journalConfig: HBaseJournalConfig) = {
     require(partition > 0, s"partition must be > 0, ($partition)")
     require(partition <= journalConfig.partitionCount, s"partition must be <= partitionCount, ($partition <!= ${journalConfig.partitionCount})")
 
@@ -56,15 +55,15 @@ object RowKey {
   }
 
   /** First key possible, similar to: `000-id-000000000000000000000` */
-  def firstForPersistenceId(persistenceId: String)(implicit journalConfig: PersistencePluginSettings) =
+  def firstForPersistenceId(persistenceId: String)(implicit journalConfig: HBaseJournalConfig) =
     RowKey(0, persistenceId, 0)
 
   /** Last key possible, similar to: `999-id-Long.MaxValue` */
-  def lastForPersistenceId(persistenceId: String, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: PersistencePluginSettings) =
+  def lastForPersistenceId(persistenceId: String, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: HBaseJournalConfig) =
     lastInPartition(persistenceId, selectPartition(journalConfig.partitionCount), toSequenceNr)
 
   /** Used to avoid writing all data to the same region - see "hot region" problem */
-  def selectPartition(sequenceNr: Long)(implicit journalConfig: PersistencePluginSettings): Long =
+  def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Long =
     if (sequenceNr % journalConfig.partitionCount == 0)
       journalConfig.partitionCount
     else

@@ -1,4 +1,4 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
 import org.apache.hadoop.hbase.util.Bytes._
 

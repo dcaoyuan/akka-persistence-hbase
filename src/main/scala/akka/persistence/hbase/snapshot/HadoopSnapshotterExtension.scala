@@ -1,11 +1,12 @@
 package akka.persistence.hbase.snapshot
 
-import akka.actor._
-import akka.persistence.PersistenceSettings
-import akka.persistence.hbase.journal.{ HBaseJournalInit, HBaseClientFactory, PersistencePluginSettings }
+import akka.actor.ExtendedActorSystem
+import akka.actor.ExtensionId
+import akka.actor.ExtensionIdProvider
+import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.journal.HBaseJournalInit
 
-object HadoopSnapshotterExtension extends ExtensionId[HadoopSnapshotter]
-    with ExtensionIdProvider {
+object HadoopSnapshotterExtension extends ExtensionId[HadoopSnapshotter] with ExtensionIdProvider {
 
   val SnapshotStoreModeKey = "hadoop-snapshot-store.mode"
 
@@ -15,10 +16,9 @@ object HadoopSnapshotterExtension extends ExtensionId[HadoopSnapshotter]
     val config = system.settings.config
     val mode = config.getString(SnapshotStoreModeKey)
 
-    val pluginPersistenceSettings = PersistencePluginSettings(config)
-    val persistenceSettings = new PersistenceSettings(config.getConfig("akka.persistence"))
+    val pluginPersistenceSettings = new HBaseSnapshotConfig(config)
 
-    val client = HBaseClientFactory.getClient(pluginPersistenceSettings, persistenceSettings)
+    val client = HBaseClientFactory.getClient(pluginPersistenceSettings)
 
     mode match {
       case "hbase" =>

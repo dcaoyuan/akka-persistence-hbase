@@ -98,14 +98,14 @@ object Build extends sbt.Build {
 
 object Dependencies {
   val SLF4J_VERSION = "1.7.7"
-  val AKKA_VERSION = "2.3.4"
+  val AKKA_VERSION = "2.4.2"
   val HADOOP_VERSION = "2.5.0"
   val HBASE_VERSION = "0.98.9-hadoop2"
 
   val akka = Seq(
     "com.typesafe.akka" %% "akka-actor" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-contrib" % AKKA_VERSION,
-    "com.typesafe.akka" %% "akka-persistence-experimental" % AKKA_VERSION exclude ("org.iq80.leveldb", "leveldb"),
+    "com.typesafe.akka" %% "akka-persistence" % AKKA_VERSION exclude ("org.iq80.leveldb", "leveldb"),
     "com.typesafe.akka" %% "akka-slf4j" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-testkit" % AKKA_VERSION % Test,
     "com.typesafe.akka" %% "akka-multi-node-testkit" % AKKA_VERSION % Test,

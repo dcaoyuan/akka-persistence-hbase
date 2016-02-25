@@ -1,7 +1,6 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
-import akka.persistence.hbase.common.Columns._
-import akka.persistence.hbase.journal.PersistencePluginSettings
+import akka.persistence.hbase.Columns._
 import org.apache.hadoop.hbase.client.Scan
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
 import org.apache.hadoop.hbase.filter._
@@ -9,7 +8,7 @@ import org.apache.hadoop.hbase.util.Bytes
 
 trait HBaseUtils {
 
-  def hBasePersistenceSettings: PersistencePluginSettings
+  def hBasePersistenceSettings: HBasePluginConfig
 
   def preparePartitionScan(table: Array[Byte], family: Array[Byte], startScanKey: RowKey, stopScanKey: RowKey, persistenceIdRowRegex: String, onlyRowKeys: Boolean): Scan = {
     val scan = new Scan

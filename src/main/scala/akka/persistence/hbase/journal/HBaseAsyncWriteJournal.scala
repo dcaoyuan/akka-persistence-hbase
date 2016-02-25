@@ -1,44 +1,61 @@
 package akka.persistence.hbase.journal
 
-import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
-import akka.persistence.hbase.common._
+import akka.Done
+import akka.actor.{ Actor, ActorLogging, ActorRef, Props, ExtendedActorSystem, NoSerializationVerificationNeeded }
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator
+import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.journal.Operator.AllOpsSubmitted
 import akka.persistence.journal.AsyncWriteJournal
-import akka.persistence.{ PersistenceSettings, PersistentConfirmation, PersistentId, PersistentRepr }
+import akka.persistence.journal.Tagged
+import akka.persistence.{ PersistentRepr, AtomicWrite }
+import akka.serialization.Serialization
 import akka.serialization.SerializationExtension
+import akka.serialization.SerializerWithStringManifest
 import com.google.common.base.Stopwatch
+import java.nio.ByteBuffer
+import java.util.Locale
 import org.apache.hadoop.hbase.client.{ HTable, Scan }
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
 import org.apache.hadoop.hbase.filter._
 
 import scala.collection.immutable
 import scala.concurrent._
+import scala.concurrent.duration.Duration
+import scala.concurrent.duration.FiniteDuration
+import scala.util.Try
+
+object HBaseAsyncWriteJournal {
+  private case class WriteFinished(pid: String, f: Future[Done]) extends NoSerializationVerificationNeeded
+  private case class MessageId(persistenceId: String, sequenceNr: Long)
+  private case class SerializedAtomicWrite(persistenceId: String, payload: Seq[Serialized])
+  private case class Serialized(persistenceId: String, sequenceNr: Long, serialized: ByteBuffer, tags: Set[String],
+                                eventManifest: String, serManifest: String, serId: Int, writerUuid: String)
+}
 
 /**
  * Asyncronous HBase Journal.
  *
  * Uses AsyncBase to implement asynchronous IPC with HBase.
  */
-class HBaseAsyncWriteJournal extends Actor with ActorLogging
-    with HBaseJournalBase with AsyncWriteJournal
-    with HBaseAsyncRecovery {
+class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery with HBaseJournalBase {
 
-  import akka.persistence.hbase.common.TestingEventProtocol._
+  import HBaseAsyncWriteJournal._
+  import akka.persistence.hbase.TestingEventProtocol._
   import akka.persistence.hbase.journal.RowTypeMarkers._
 
   private lazy val config = context.system.settings.config
 
-  implicit lazy val hBasePersistenceSettings = PersistencePluginSettings(config)
+  implicit lazy val hBasePersistenceSettings = new HBaseJournalConfig(config)
 
   override def serialization = SerializationExtension(context.system)
 
   lazy val table = hBasePersistenceSettings.table
-
   lazy val family = hBasePersistenceSettings.family
-
   lazy val hadoopConfig = hBasePersistenceSettings.hadoopConfiguration
 
-  lazy val client = HBaseClientFactory.getClient(hBasePersistenceSettings, new PersistenceSettings(config.getConfig("akka.persistence")))
+  lazy val client = HBaseClientFactory.getClient(hBasePersistenceSettings)
 
   lazy val hTable = new HTable(hadoopConfig, tableBytes)
 
@@ -46,40 +63,132 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
 
   implicit override val pluginDispatcher = context.system.dispatchers.lookup(hBasePersistenceSettings.pluginDispatcherId)
 
-  import akka.persistence.hbase.common.Columns._
-  import akka.persistence.hbase.common.DeferredConversions._
+  import akka.persistence.hbase.Columns._
+  import akka.persistence.hbase.DeferredConversions._
   import org.apache.hadoop.hbase.util.Bytes._
 
+  val pubsubMinimumInterval: Duration = {
+    import akka.util.Helpers.{ ConfigOps, Requiring }
+    val key = "pubsub-minimum-interval"
+    config.getString(key).toLowerCase(Locale.ROOT) match {
+      case "off" ⇒ Duration.Undefined
+      case _     ⇒ config.getMillisDuration(key) requiring (_ > Duration.Zero, key + " > 0s, or off")
+    }
+  }
+  // Announce written changes to DistributedPubSub if pubsub-minimum-interval is defined in config
+  private val pubsub = pubsubMinimumInterval match {
+    case interval: FiniteDuration =>
+      // PubSub will be ignored when clustering is unavailable
+      Try {
+        DistributedPubSub(context.system)
+      }.toOption flatMap { extension =>
+        if (extension.isTerminated)
+          None
+        else
+          Some(context.actorOf(PubSubThrottler.props(extension.mediator, interval)
+            .withDispatcher(context.props.dispatcher)))
+      }
+
+    case _ => None
+  }
   // journal plugin api impl -------------------------------------------------------------------------------------------
 
-  override def asyncWriteMessages(persistentBatch: immutable.Seq[PersistentRepr]): Future[Unit] = {
-    log.debug(s"Write async for {} presistent messages", persistentBatch.size)
-    val watch = Stopwatch.createStarted()
+  override def asyncWriteMessages(messages: immutable.Seq[AtomicWrite]) /*: Future[Seq[Try[Unit]]]*/ = {
+    // we need to preserve the order / size of this sequence even though we don't map
+    // AtomicWrites 1:1 with a C* insert
+    //
+    // We must NOT catch serialization exceptions here because rejections will cause
+    // holes in the sequence number series and we use the sequence numbers to detect
+    // missing (delayed) events in the eventByTag query.
+    //
+    // Note that we assume that all messages have the same persistenceId, which is
+    // the case for Akka 2.4.2.
 
-    val futures = persistentBatch map { p =>
-      import p._
+    def serialize(aw: AtomicWrite): SerializedAtomicWrite =
+      SerializedAtomicWrite(
+        aw.persistenceId,
+        aw.payload.map { pr =>
+          val (pr2, tags) = pr.payload match {
+            case Tagged(payload, tags) =>
+              (pr.withPayload(payload), tags)
+            case _ => (pr, Set.empty[String])
+          }
+          serializeEvent(pr2, tags)
+        })
 
-      log.debug("Putting into: {}", RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString)
-      executePut(
-        RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
-        Array(PersistenceId, SequenceNr, Marker, Message),
-        Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), persistentToBytes(p)))
+    def publishTagNotification(serialized: Seq[SerializedAtomicWrite], result: Future[_]): Unit = {
+      if (pubsub.isDefined) {
+        result.foreach { _ =>
+          for (
+            p <- pubsub;
+            tag: String <- serialized.map(_.payload.map(_.tags).flatten).flatten.toSet
+          ) {
+            p ! DistributedPubSubMediator.Publish("akka.persistence.hbase.journal.tag", tag)
+          }
+        }
+      }
     }
 
-    flushWrites()
-    Future.sequence(futures) map {
-      case _ =>
-        log.debug("Completed writing {} messages (took: {})", persistentBatch.size, watch.stop()) // todo better failure / success?
-        if (publishTestingEvents) context.system.eventStream.publish(FinishedWrites(persistentBatch.size))
+    log.debug(s"Write async for {} presistent messages", messages.size)
+    val watch = Stopwatch.createStarted()
+    val maxMessageBatchSize = 100
+
+    val p = Promise[Done]
+    val pid = messages.head.persistenceId
+
+    Future(messages.map(serialize)).flatMap { serialized =>
+      val result =
+        if (messages.size <= maxMessageBatchSize) {
+          // optimize for the common case
+          writeMessages(serialized)
+        } else {
+          val groups: List[Seq[SerializedAtomicWrite]] = serialized.grouped(maxMessageBatchSize).toList
+
+          // execute the groups in sequence
+          def rec(todo: List[Seq[SerializedAtomicWrite]], acc: List[Unit]): Future[List[Unit]] =
+            todo match {
+              case write :: remainder => writeMessages(write).flatMap(result => rec(remainder, result :: acc))
+              case Nil                => Future.successful(acc.reverse)
+            }
+          rec(groups, Nil)
+        }
+
+      //log.debug("Putting into: {}", RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString)
+      result.onComplete { _ =>
+        flushWrites()
+        self ! WriteFinished(pid, p.future)
+        p.success(Done)
+      }(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
+
+      log.debug("Completed writing {} messages (took: {})", messages.size, watch.stop()) // todo better failure / success?
+      if (publishTestingEvents) context.system.eventStream.publish(FinishedWrites(messages.size))
+
+      publishTagNotification(serialized, result)
+      // Nil == all good
+      result.map(_ => List[Try[Unit]]())(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
     }
   }
 
+  private def writeMessages(atomicWrites: Seq[SerializedAtomicWrite]): Future[Unit] = {
+    val persistenceId: String = atomicWrites.head.persistenceId
+    val all = atomicWrites.flatMap(_.payload)
+    val writes = all map { m =>
+      val sequenceNr = m.sequenceNr
+      executePut(
+        RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
+        Array(PersistenceId, SequenceNr, Marker, Message),
+        Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), m.serialized.array))
+    }
+    Future.sequence(writes).map(_ => ())
+  }
+
   // todo should be optimised to do ranged deletes
-  override def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long, permanent: Boolean): Future[Unit] = {
+  override def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] = {
     val watch = Stopwatch.createStarted()
-    log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive), premanent: {}", persistenceId, toSequenceNr, permanent)
+    log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive)", persistenceId, toSequenceNr)
 
     // prepare delete function (delete or mark as deleted)
+    val permanent = true // TODO
     val doDelete = deleteFunctionFor(permanent)
 
     def scanAndDeletePartition(part: Long, operator: ActorRef): Unit = {
@@ -126,40 +235,9 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
 
     deleteRowsPromise.future map {
       case _ =>
-        log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, permanent: {} (took: {})", persistenceId, toSequenceNr, permanent, watch.stop())
+        log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {})", persistenceId, toSequenceNr, watch.stop())
         if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
     }
-  }
-
-  @deprecated("Will be removed")
-  override def asyncWriteConfirmations(confirmations: immutable.Seq[PersistentConfirmation]): Future[Unit] = {
-    log.debug(s"AsyncWriteConfirmations for {} messages", confirmations.size)
-    val watch = Stopwatch.createStarted()
-
-    val fs = confirmations map { confirm =>
-      confirmAsync(confirm.persistenceId, confirm.sequenceNr, confirm.channelId)
-    }
-
-    flushWrites()
-    Future.sequence(fs) map {
-      case _ =>
-        log.debug("Completed confirming {} messages (took: {})", confirmations.size, watch.stop()) // todo better failure / success?
-    }
-  }
-
-  @deprecated("Will be removed")
-  override def asyncDeleteMessages(messageIds: immutable.Seq[PersistentId], permanent: Boolean): Future[Unit] = {
-    log.debug(s"Async delete [{}] messages, premanent: {}", messageIds.size, permanent)
-
-    val doDelete = deleteFunctionFor(permanent)
-
-    val deleteFutures = for {
-      messageId <- messageIds
-      rowId = RowKey(selectPartition(messageId.sequenceNr), messageId.persistenceId, messageId.sequenceNr)
-    } yield doDelete(rowId.toBytes)
-
-    flushWrites()
-    Future.sequence(deleteFutures)
   }
 
   // end of journal plugin api impl ------------------------------------------------------------------------------------
@@ -181,6 +259,35 @@ class HBaseAsyncWriteJournal extends Actor with ActorLogging
   override def postStop(): Unit = {
     try hTable.close() finally client.shutdown()
     super.postStop()
+  }
+
+  private lazy val transportInformation: Option[Serialization.Information] = {
+    val address = context.system.asInstanceOf[ExtendedActorSystem].provider.getDefaultAddress
+    if (address.hasLocalScope) None
+    else Some(Serialization.Information(address, context.system))
+  }
+
+  private def serializeEvent(p: PersistentRepr, tags: Set[String]): Serialized = {
+    def doSerializeEvent(): Serialized = {
+      val event: AnyRef = p.payload.asInstanceOf[AnyRef]
+      val serializer = serialization.findSerializerFor(event)
+      val serManifest = serializer match {
+        case ser2: SerializerWithStringManifest =>
+          ser2.manifest(event)
+        case _ =>
+          if (serializer.includeManifest) event.getClass.getName
+          else PersistentRepr.Undefined
+      }
+      val serEvent = ByteBuffer.wrap(serialization.serialize(event).get)
+      Serialized(p.persistenceId, p.sequenceNr, serEvent, tags, p.manifest, serManifest,
+        serializer.identifier, p.writerUuid)
+    }
+
+    // serialize actor references with full address information (defaultAddress)
+    transportInformation match {
+      case Some(ti) => Serialization.currentTransportInformation.withValue(ti) { doSerializeEvent() }
+      case None     => doSerializeEvent()
+    }
   }
 }
 

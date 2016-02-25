@@ -5,7 +5,9 @@ import java.util.concurrent.TimeUnit
 
 import akka.actor._
 import akka.persistence._
-import akka.persistence.hbase.common.TestingEventProtocol.FinishedDeletes
+import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.TestingEventProtocol.FinishedDeletes
+import akka.persistence.hbase.snapshot.HBaseSnapshotConfig
 import akka.testkit.{ImplicitSender, TestKit, TestProbe}
 import com.google.common.base.Stopwatch
 import org.apache.hadoop.hbase.client.{Scan, HTable}
@@ -68,7 +70,8 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
 
   lazy val config = system.settings.config
 
-  lazy val settings = PersistencePluginSettings(config)
+  lazy val journalConfig = new HBaseJournalConfig(config)
+  lazy val snapshotConfig = new HBaseSnapshotConfig(config)
 
   behavior of "HBaseJournal"
 
@@ -86,11 +89,11 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
   override def afterAll() {
     super.afterAll()
     
-    HBaseJournalInit.disableTable(config, settings.table)
-    HBaseJournalInit.deleteTable(config, settings.table)
+    HBaseJournalInit.disableTable(config, journalConfig.table)
+    HBaseJournalInit.deleteTable(config, journalConfig.table)
 
-    HBaseJournalInit.disableTable(config, settings.snapshotTable)
-    HBaseJournalInit.deleteTable(config, settings.snapshotTable)
+    HBaseJournalInit.disableTable(config, snapshotConfig.snapshotTable)
+    HBaseJournalInit.deleteTable(config, snapshotConfig.snapshotTable)
     
     HBaseClientFactory.reset()
     shutdown(system)
@@ -101,7 +104,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
   }
 
   it should s"write $messagesNr messages" in {
-    val stopwatch = (new Stopwatch).start()
+    val stopwatch = Stopwatch.createStarted()
     
     messages foreach { m => actor ! m }
 
@@ -109,7 +112,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
     stopwatch.stop()
 
     info(s"Sending/persisting $messagesNr messages took: $stopwatch time")
-    info(s"This is ${messagesNr / stopwatch.elapsedTime(TimeUnit.MILLISECONDS)} msg/ms")
+    //info(s"This is ${messagesNr / stopwatch.elapsedTime(TimeUnit.MILLISECONDS)} msg/ms")
   }
 
   it should "replay those messages" in {
@@ -138,7 +141,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
   }
 
   private def countMessages(): Int = {
-    val hTable = new HTable(settings.hadoopConfiguration, settings.table)
+    val hTable = new HTable(journalConfig.hadoopConfiguration, journalConfig.table)
     val scan = new Scan
     val scanner = hTable.getScanner(scan)
     import JavaConversions._
@@ -158,7 +161,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
   }
 
   def timed(block: => Unit): Stopwatch = {
-    val stopwatch = (new Stopwatch).start()
+    val stopwatch = Stopwatch.createStarted()
     block
     stopwatch.stop()
   }

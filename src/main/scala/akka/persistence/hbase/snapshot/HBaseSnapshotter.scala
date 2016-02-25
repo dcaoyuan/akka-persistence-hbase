@@ -1,24 +1,27 @@
 package akka.persistence.hbase.snapshot
 
-import java.util.{ ArrayList => JArrayList }
-
 import akka.actor.ActorSystem
-import akka.persistence.hbase.common.TestingEventProtocol.DeletedSnapshotsFor
-import akka.persistence.hbase.common._
+import akka.persistence.hbase.AsyncBaseUtils
+import akka.persistence.hbase.DeferredConversions
+import akka.persistence.hbase.HBaseSerialization
+import akka.persistence.hbase.HBaseUtils
+import akka.persistence.hbase.RowKey
+import akka.persistence.hbase.SnapshotRowKey
+import akka.persistence.hbase.TestingEventProtocol.DeletedSnapshotsFor
 import akka.persistence.hbase.journal._
 import akka.persistence.serialization.Snapshot
 import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria }
+import java.util.{ ArrayList => JArrayList }
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.client.HTable
 import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.{ HBaseClient, KeyValue }
-
 import scala.collection.JavaConverters._
 import scala.collection.immutable
 import scala.concurrent.Future
 import scala.util.{ Failure, Success }
 
-class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: PersistencePluginSettings, val client: HBaseClient)
+class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: HBaseSnapshotConfig, val client: HBaseClient)
     extends HadoopSnapshotter
     with HBaseUtils with AsyncBaseUtils with HBaseSerialization
     with DeferredConversions {
@@ -40,7 +43,7 @@ class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: Pe
   /** Snapshots we're in progress of saving */
   private var saving = immutable.Set.empty[SnapshotMetadata]
 
-  import akka.persistence.hbase.common.Columns._
+  import akka.persistence.hbase.Columns._
   import akka.persistence.hbase.journal.RowTypeMarkers._
 
   def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
@@ -102,13 +105,13 @@ class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: Pe
     saving -= meta
   }
 
-  def delete(meta: SnapshotMetadata): Unit = {
+  def deleteAsync(meta: SnapshotMetadata): Future[Unit] = {
     log.debug("Deleting snapshot for meta: {}", meta)
     saving -= meta
     executeDelete(SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes)
   }
 
-  def delete(persistenceId: String, criteria: SnapshotSelectionCriteria): Unit = {
+  def deleteAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Unit] = {
     log.debug("Deleting snapshot for persistenceId: [{}], criteria: {}", persistenceId, criteria)
 
     val scanner = newScanner()
@@ -128,7 +131,7 @@ class HBaseSnapshotter(val system: ActorSystem, val hBasePersistenceSettings: Pe
         scanner.close()
         Future.successful()
 
-      case rows: AsyncBaseRows =>
+      case rows: AsyncBaseRows @unchecked =>
         val deletes = for {
           row <- rows.asScala
           col <- row.asScala.headOption

@@ -1,24 +1,23 @@
 package akka.persistence.hbase.snapshot
 
-import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria, SnapshotMetadata }
-import scala.concurrent.Future
-import org.apache.hadoop.fs.{ FileStatus, Path, FileSystem }
 import akka.actor.ActorSystem
-import akka.persistence.hbase.journal.PersistencePluginSettings
-import java.net.URI
-import org.apache.hadoop.conf.Configuration
-import org.apache.commons.io.FilenameUtils
-import scala.util.{ Try, Failure, Success }
+import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria, SnapshotMetadata }
 import akka.persistence.serialization.Snapshot
-import scala.annotation.tailrec
+import java.net.URI
 import java.io.Closeable
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{ FileStatus, Path, FileSystem }
+import org.apache.commons.io.FilenameUtils
 import org.apache.commons.io.IOUtils
+import scala.annotation.tailrec
 import scala.collection.immutable
+import scala.concurrent.Future
+import scala.util.{ Try, Failure, Success }
 
 /**
  * Dump and read Snapshots to/from HDFS.
  */
-class HdfsSnapshotter(val system: ActorSystem, settings: PersistencePluginSettings)
+class HdfsSnapshotter(val system: ActorSystem, settings: HBaseSnapshotConfig)
     extends HadoopSnapshotter {
 
   val log = system.log
@@ -66,19 +65,23 @@ class HdfsSnapshotter(val system: ActorSystem, settings: PersistencePluginSettin
     saving -= meta
   }
 
-  def delete(meta: SnapshotMetadata) {
-    val desc = HdfsSnapshotDescriptor(meta)
-    fs.delete(new Path(settings.snapshotHdfsDir, desc.toFilename), true)
-    log.debug("Deleted snapshot: {}", desc)
-    saving -= meta
+  def deleteAsync(meta: SnapshotMetadata): Future[Unit] = {
+    Future {
+      val desc = HdfsSnapshotDescriptor(meta)
+      fs.delete(new Path(settings.snapshotHdfsDir, desc.toFilename), true)
+      log.debug("Deleted snapshot: {}", desc)
+      saving -= meta
+    }
   }
 
-  def delete(persistenceId: String, criteria: SnapshotSelectionCriteria) {
-    val toDelete = listSnapshots(settings.snapshotHdfsDir, persistenceId).dropWhile(_.seqNumber > criteria.maxSequenceNr)
+  def deleteAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Unit] = {
+    Future {
+      val toDelete = listSnapshots(settings.snapshotHdfsDir, persistenceId).dropWhile(_.seqNumber > criteria.maxSequenceNr)
 
-    toDelete foreach { desc =>
-      val path = new Path(settings.snapshotHdfsDir, desc.toFilename)
-      fs.delete(path, true)
+      toDelete foreach { desc =>
+        val path = new Path(settings.snapshotHdfsDir, desc.toFilename)
+        fs.delete(path, true)
+      }
     }
   }
 

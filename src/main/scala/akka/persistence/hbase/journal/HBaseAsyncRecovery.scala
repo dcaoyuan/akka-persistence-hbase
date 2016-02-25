@@ -1,36 +1,38 @@
 package akka.persistence.hbase.journal
 
-import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
-
 import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.persistence.PersistentRepr
-import akka.persistence.hbase.common.RowKey
+import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.journal.Resequencer.AllPersistentsSubmitted
 import akka.persistence.journal._
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.{ HBaseClient, KeyValue }
-
 import scala.collection.mutable
 import scala.concurrent.{ Future, Promise }
 
-trait HBaseAsyncRecovery extends AsyncRecovery {
-  this: Actor with ActorLogging with HBaseAsyncWriteJournal =>
+trait HBaseAsyncRecovery extends ActorLogging {
+  this: HBaseAsyncWriteJournal =>
 
   private[persistence] def client: HBaseClient
 
-  private[persistence] implicit def hBasePersistenceSettings: PersistencePluginSettings
+  private[persistence] implicit def hBasePersistenceSettings: HBaseJournalConfig
 
   private lazy val replayDispatcherId = hBasePersistenceSettings.replayDispatcherId
 
   override implicit val pluginDispatcher = context.system.dispatchers.lookup(replayDispatcherId)
 
-  import akka.persistence.hbase.common.Columns._
+  import akka.persistence.hbase.Columns._
 
   // async recovery plugin impl
 
-  override def asyncReplayMessages(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long, max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
+  override def asyncReplayMessages(
+    persistenceId: String,
+    fromSequenceNr: Long,
+    toSequenceNr: Long,
+    max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
     case 0 =>
       log.debug("Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
         persistenceId, fromSequenceNr, toSequenceNr)
@@ -48,7 +50,7 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
       val partitions = hBasePersistenceSettings.partitionCount
 
       def scanPartition(part: Long, resequencer: ActorRef): Long = {
-        val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr) // 021-ID-0000000000000000021
+        val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr)(hBasePersistenceSettings) // 021-ID-0000000000000000021
         val stopSequenceNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
         val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr) // 021-ID-9223372036854775800
         val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
@@ -107,8 +109,9 @@ trait HBaseAsyncRecovery extends AsyncRecovery {
                   // channel confirmation
                   val persistentRepr = persistentFromBytes(CellUtil.cloneValue(messageCell))
 
-                  val channelId = RowTypeMarkers.extractSeqNrFromConfirmedMarker(marker)
-                  replayCallback(persistentRepr.update(confirms = channelId +: persistentRepr.confirms))
+                  //val channelId = RowTypeMarkers.extractSeqNrFromConfirmedMarker(marker)
+                  //replayCallback(persistentRepr.update(confirms = channelId +: persistentRepr.confirms))
+                  replayCallback(persistentRepr)
               }
             }
             res = scanner.next()
@@ -217,7 +220,7 @@ private[hbase] class Resequencer(
 
   private lazy val config = context.system.settings.config
 
-  implicit lazy val hBasePersistenceSettings = PersistencePluginSettings(config)
+  implicit lazy val hBasePersistenceSettings = new HBaseJournalConfig(config)
 
   private var allSubmitted = false
 
@@ -228,7 +231,7 @@ private[hbase] class Resequencer(
   import akka.persistence.hbase.journal.Resequencer._
 
   def receive = {
-    case p: PersistentRepr ⇒
+    case p: PersistentRepr =>
       //      log.debug("Resequencing {} from {}; Delivered until {} already", p.payload, p.sequenceNr, deliveredSeqNr)
       resequence(p)
 

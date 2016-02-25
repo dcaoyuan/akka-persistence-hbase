@@ -1,9 +1,8 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
-import java.{ util => ju }
-
-import akka.persistence.hbase.journal.PersistencePluginSettings
+import akka.persistence.hbase.journal.HBaseJournalConfig
 import akka.persistence.hbase.journal.RowTypeMarkers._
+import java.{ util => ju }
 import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.{ DeleteRequest, HBaseClient, KeyValue, PutRequest }
 
@@ -21,11 +20,11 @@ trait AsyncBaseUtils {
   def family: String
   lazy val familyBytes = Bytes.toBytes(family)
 
-  import akka.persistence.hbase.common.Columns._
-  import akka.persistence.hbase.common.DeferredConversions._
+  import akka.persistence.hbase.Columns._
+  import akka.persistence.hbase.DeferredConversions._
 
   /** Used to avoid writing all data to the same region - see "hot region" problem */
-  def selectPartition(sequenceNr: Long)(implicit journalConfig: PersistencePluginSettings): Long =
+  def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Long =
     RowKey.selectPartition(sequenceNr)
 
   protected def isSnapshotRow(columns: Seq[KeyValue]): Boolean =

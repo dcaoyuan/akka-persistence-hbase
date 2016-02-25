@@ -1,4 +1,4 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
 import akka.persistence.SnapshotSelectionCriteria
 

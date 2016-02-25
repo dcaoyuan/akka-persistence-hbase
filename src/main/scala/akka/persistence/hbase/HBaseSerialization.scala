@@ -1,7 +1,7 @@
-package akka.persistence.hbase.common
+package akka.persistence.hbase
 
 import akka.persistence.serialization.Snapshot
-import akka.persistence.{ Persistent, PersistentRepr }
+import akka.persistence.{ PersistentRepr }
 import akka.serialization.Serialization
 
 trait HBaseSerialization {
@@ -17,7 +17,7 @@ trait HBaseSerialization {
   protected def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
     serialization.deserialize(bytes, classOf[PersistentRepr]).get
 
-  protected def persistentToBytes(msg: Persistent): Array[Byte] =
-    serialization.serialize(msg).get
+  //protected def persistentToBytes(msg: Persistent): Array[Byte] =
+  // serialization.serialize(msg).get
 
 }
