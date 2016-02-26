@@ -1,9 +1,10 @@
 package akka.persistence.hbase
 
-import scala.collection.immutable
 import akka.persistence.hbase.journal.HBaseJournalInit
 import com.typesafe.config.Config
+import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
+import scala.collection.immutable
 import scala.concurrent.duration._
 
 case class StorePathPasswordConfig(path: String, password: String)
@@ -24,6 +25,10 @@ class HBasePluginConfig(config: Config) {
   val scanBatchSize = journalConfig.getInt("scan-batch-size")
 
   val hadoopConfiguration = if (config ne null) HBaseJournalInit.getHBaseConfig(config) else null
+
+  val connectionRetries: Int = config.getInt("connect-retries")
+  val connectionRetryDelay: FiniteDuration = config.getDuration("connect-retry-delay", TimeUnit.MILLISECONDS).millis
+
 }
 
 object HBasePluginConfig {

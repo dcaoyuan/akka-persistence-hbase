@@ -24,8 +24,8 @@ class HBaseJournalConfig(config: Config) extends HBasePluginConfig(config) {
   val pubsubMinimumInterval: Duration = {
     val key = "pubsub-minimum-interval"
     config.getString(key).toLowerCase(Locale.ROOT) match {
-      case "off" ⇒ Duration.Undefined
-      case _     ⇒ config.getMillisDuration(key) requiring (_ > Duration.Zero, key + " > 0s, or off")
+      case "off" => Duration.Undefined
+      case _     => config.getMillisDuration(key) requiring (_ > Duration.Zero, key + " > 0s, or off")
     }
   }
 

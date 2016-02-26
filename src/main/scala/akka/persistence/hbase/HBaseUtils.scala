@@ -6,7 +6,7 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
 import org.apache.hadoop.hbase.filter._
 import org.apache.hadoop.hbase.util.Bytes
 
-trait HBaseUtils {
+trait HBaseUtilsBak {
 
   def hBasePersistenceSettings: HBasePluginConfig
 

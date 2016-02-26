@@ -9,20 +9,16 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.util.Bytes
-import org.hbase.async.{ HBaseClient, KeyValue }
+import org.hbase.async.KeyValue
 import scala.collection.mutable
 import scala.concurrent.{ Future, Promise }
 
 trait HBaseAsyncRecovery extends ActorLogging {
   this: HBaseAsyncWriteJournal =>
 
-  private[persistence] def client: HBaseClient
+  private lazy val replayDispatcherId = config.replayDispatcherId
 
-  private[persistence] implicit def hBasePersistenceSettings: HBaseJournalConfig
-
-  private lazy val replayDispatcherId = hBasePersistenceSettings.replayDispatcherId
-
-  override implicit val pluginDispatcher = context.system.dispatchers.lookup(replayDispatcherId)
+  implicit val pluginDispatcher = context.system.dispatchers.lookup(replayDispatcherId)
 
   import akka.persistence.hbase.Columns._
 
@@ -34,23 +30,25 @@ trait HBaseAsyncRecovery extends ActorLogging {
     toSequenceNr: Long,
     max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
     case 0 =>
-      log.debug("Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
+      log.debug(
+        "Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
         persistenceId, fromSequenceNr, toSequenceNr)
 
       Future.successful() // no need to do a replay anything
 
     case _ =>
-      log.debug("Async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}]{}",
+      log.debug(
+        "Async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}]{}",
         persistenceId, fromSequenceNr, toSequenceNr, if (max != Long.MaxValue) s", limited to: $max messages" else "")
 
       val reachedSeqNrPromise = Promise[Long]()
       val loopedMaxFlag = new AtomicBoolean(false) // the resequencer may let us know that it looped `max` messages, and we can abort further scanning
       val resequencer = context.actorOf(Resequencer.props(persistenceId, fromSequenceNr, max, replayCallback, loopedMaxFlag, reachedSeqNrPromise, replayDispatcherId))
 
-      val partitions = hBasePersistenceSettings.partitionCount
+      val partitions = config.partitionCount
 
       def scanPartition(part: Long, resequencer: ActorRef): Long = {
-        val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr)(hBasePersistenceSettings) // 021-ID-0000000000000000021
+        val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr)(config) // 021-ID-0000000000000000021
         val stopSequenceNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
         val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr) // 021-ID-9223372036854775800
         val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
@@ -61,8 +59,8 @@ trait HBaseAsyncRecovery extends ActorLogging {
 
         log.debug("Scanning {} partition for replay, from {} to {}", part, startScanKey.toKeyString, stopScanKey.toKeyString)
 
-        val scan = preparePartitionScan(tableBytes, familyBytes, startScanKey, stopScanKey, persistenceIdRowRegex, onlyRowKeys = false)
-        val scanner = hTable.getScanner(scan)
+        val scan = session.preparePartitionScan(startScanKey, stopScanKey, persistenceIdRowRegex, onlyRowKeys = false)
+        val scanner = session.htable.getScanner(scan)
 
         var lowestSeqNr: Long = 0L
 
@@ -83,8 +81,8 @@ trait HBaseAsyncRecovery extends ActorLogging {
             // Since this is multiple scans, on multiple partitions, they are not ordered, yet we must deliver ordered messages
             // to the receiver. Only the resequencer knows how many are really "delivered"
 
-            val markerCell = res.getColumnLatestCell(familyBytes, Marker)
-            val messageCell = res.getColumnLatestCell(familyBytes, Message)
+            val markerCell = session.getColumnLatestCell(res, Marker)
+            val messageCell = session.getColumnLatestCell(res, Message)
 
             if ((markerCell ne null) && (messageCell ne null)) {
               val marker = Bytes.toString(CellUtil.cloneValue(markerCell))
@@ -148,7 +146,7 @@ trait HBaseAsyncRecovery extends ActorLogging {
   override def asyncReadHighestSequenceNr(persistenceId: String, fromSequenceNr: Long): Future[Long] = {
     log.debug(s"Async read for highest sequence number for persistenceId: [$persistenceId] (hint, seek from  nr: [$fromSequenceNr])")
 
-    val partitions = hBasePersistenceSettings.partitionCount
+    val partitions = config.partitionCount
 
     def scanPartitionForMaxSeqNr(part: Long): Long = {
       val startScanKey = RowKey.firstInPartition(persistenceId, part, fromSequenceNr) // 021-ID-0000000000000000021
@@ -159,8 +157,8 @@ trait HBaseAsyncRecovery extends ActorLogging {
 
       //      log.debug("Scanning {} partition, from {} to {}", part, startScanKey.toKeyString, stopScanKey.toKeyString)
 
-      val scan = preparePartitionScan(tableBytes, familyBytes, startScanKey, stopScanKey, persistenceIdRowRegex, onlyRowKeys = true)
-      val scanner = hTable.getScanner(scan)
+      val scan = session.preparePartitionScan(startScanKey, stopScanKey, persistenceIdRowRegex, onlyRowKeys = true)
+      val scanner = session.htable.getScanner(scan)
 
       var highestSeqNr: Long = 0L
 
@@ -191,11 +189,13 @@ trait HBaseAsyncRecovery extends ActorLogging {
   //  end of async recovery plugin impl
 
   private def sequenceNr(columns: mutable.Buffer[KeyValue]): Long = {
-    val messageKeyValue = findColumn(columns, Message)
+    val messageKeyValue = session.findColumn(columns, Message)
     val msg = persistentFromBytes(messageKeyValue.value)
     msg.sequenceNr
   }
 
+  protected def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
+    serialization.deserialize(bytes, classOf[PersistentRepr]).get
 }
 
 /**
@@ -218,9 +218,7 @@ private[hbase] class Resequencer(
     loopedMaxFlag: AtomicBoolean,
     reachedSeqNr: Promise[Long]) extends Actor with ActorLogging {
 
-  private lazy val config = context.system.settings.config
-
-  implicit lazy val hBasePersistenceSettings = new HBaseJournalConfig(config)
+  implicit lazy val config = new HBaseJournalConfig(context.system.settings.config)
 
   private var allSubmitted = false
 
@@ -283,7 +281,8 @@ private[hbase] class Resequencer(
     context stop self
   }
   private def failResequencing(delayed: collection.Map[Long, PersistentRepr]) {
-    log.error("All persistents supbmitted but delayed is not empty, some messages must fail to replay: {}",
+    log.error(
+      "All persistents supbmitted but delayed is not empty, some messages must fail to replay: {}",
       delayed.keys.map { sequenceNr =>
         RowKey(RowKey.selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString
       }.mkString(", "))

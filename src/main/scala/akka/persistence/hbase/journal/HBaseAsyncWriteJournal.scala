@@ -4,7 +4,8 @@ import akka.Done
 import akka.actor.{ Actor, ActorLogging, ActorRef, Props, ExtendedActorSystem, NoSerializationVerificationNeeded }
 import akka.cluster.pubsub.DistributedPubSub
 import akka.cluster.pubsub.DistributedPubSubMediator
-import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.Session
+import akka.persistence.hbase._
 import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.journal.Operator.AllOpsSubmitted
 import akka.persistence.journal.AsyncWriteJournal
@@ -15,18 +16,19 @@ import akka.serialization.SerializationExtension
 import akka.serialization.SerializerWithStringManifest
 import com.google.common.base.Stopwatch
 import java.nio.ByteBuffer
-import java.util.Locale
-import org.apache.hadoop.hbase.client.{ HTable, Scan }
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
+import org.apache.hadoop.hbase.client.Scan
 import org.apache.hadoop.hbase.filter._
-
+import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
+import org.apache.hadoop.hbase.util.Bytes
 import scala.collection.immutable
 import scala.concurrent._
-import scala.concurrent.duration.Duration
 import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
+import scala.util.control.NonFatal
 
-object HBaseAsyncWriteJournal {
+private[hbase] object HBaseAsyncWriteJournal {
+  private case object Init
+
   private case class WriteFinished(pid: String, f: Future[Done]) extends NoSerializationVerificationNeeded
   private case class MessageId(persistenceId: String, sequenceNr: Long)
   private case class SerializedAtomicWrite(persistenceId: String, payload: Seq[Serialized])
@@ -39,44 +41,33 @@ object HBaseAsyncWriteJournal {
  *
  * Uses AsyncBase to implement asynchronous IPC with HBase.
  */
-class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery with HBaseJournalBase {
+class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
 
   import HBaseAsyncWriteJournal._
   import akka.persistence.hbase.TestingEventProtocol._
   import akka.persistence.hbase.journal.RowTypeMarkers._
 
-  private lazy val config = context.system.settings.config
+  implicit val config = new HBaseJournalConfig(context.system.settings.config)
 
-  implicit lazy val hBasePersistenceSettings = new HBaseJournalConfig(config)
+  val serialization = SerializationExtension(context.system)
 
-  override def serialization = SerializationExtension(context.system)
+  lazy val publishTestingEvents = config.publishTestingEvents
 
-  lazy val table = hBasePersistenceSettings.table
-  lazy val family = hBasePersistenceSettings.family
-  lazy val hadoopConfig = hBasePersistenceSettings.hadoopConfiguration
-
-  lazy val client = HBaseClientFactory.getClient(hBasePersistenceSettings)
-
-  lazy val hTable = new HTable(hadoopConfig, tableBytes)
-
-  lazy val publishTestingEvents = hBasePersistenceSettings.publishTestingEvents
-
-  implicit override val pluginDispatcher = context.system.dispatchers.lookup(hBasePersistenceSettings.pluginDispatcherId)
+  implicit override val pluginDispatcher = context.system.dispatchers.lookup(config.pluginDispatcherId)
 
   import akka.persistence.hbase.Columns._
   import akka.persistence.hbase.DeferredConversions._
   import org.apache.hadoop.hbase.util.Bytes._
 
-  val pubsubMinimumInterval: Duration = {
-    import akka.util.Helpers.{ ConfigOps, Requiring }
-    val key = "pubsub-minimum-interval"
-    config.getString(key).toLowerCase(Locale.ROOT) match {
-      case "off" ⇒ Duration.Undefined
-      case _     ⇒ config.getMillisDuration(key) requiring (_ > Duration.Zero, key + " > 0s, or off")
-    }
-  }
+  // readHighestSequence must be performed after pending write for a persistenceId
+  // when the persistent actor is restarted.
+  // It seems like C* doesn't support session consistency so we handle it ourselves.
+  // https://aphyr.com/posts/299-the-trouble-with-timestamps
+  // But what about HBase
+  private val writeInProgress = new java.util.HashMap[String, Future[Done]]()
+
   // Announce written changes to DistributedPubSub if pubsub-minimum-interval is defined in config
-  private val pubsub = pubsubMinimumInterval match {
+  private val pubsub = config.pubsubMinimumInterval match {
     case interval: FiniteDuration =>
       // PubSub will be ignored when clustering is unavailable
       Try {
@@ -91,6 +82,87 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
 
     case _ => None
   }
+
+  private[journal] class HBaseSession(val underlying: Session) {
+
+    //    executeCreateKeyspaceAndTables(underlying, config.keyspaceAutoCreate, maxTagId)
+    //
+    //    val preparedWriteMessage = underlying.prepare(writeMessage)
+    //    val preparedDeleteMessages = underlying.prepare(deleteMessages)
+    //    val preparedSelectMessages = underlying.prepare(selectMessages).setConsistencyLevel(readConsistency)
+    //    val preparedCheckInUse = underlying.prepare(selectInUse).setConsistencyLevel(readConsistency)
+    //    val preparedWriteInUse = underlying.prepare(writeInUse)
+    //    val preparedSelectHighestSequenceNr = underlying.prepare(selectHighestSequenceNr).setConsistencyLevel(readConsistency)
+    //    val preparedSelectDeletedTo = underlying.prepare(selectDeletedTo).setConsistencyLevel(readConsistency)
+    //    val preparedInsertDeletedTo = underlying.prepare(insertDeletedTo).setConsistencyLevel(writeConsistency)
+    //
+    //    def protocolVersion: ProtocolVersion =
+    //      underlying.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
+  }
+
+  private var sessionUsed = false
+
+  private[journal] lazy val hbaseSession: HBaseSession = {
+    retry(config.connectionRetries + 1, config.connectionRetryDelay.toMillis) {
+      val table = Bytes.toBytes(config.table)
+      val family = Bytes.toBytes(config.family)
+      val underlying: Session = new Session(table, family, config)
+      try {
+        val s = new HBaseSession(underlying)
+        //new CassandraConfigChecker {
+        //  override def session: Session = s.underlying
+        //  override def config: CassandraJournalConfig = CassandraJournal.this.config
+        //}.initializePersistentConfig()
+        log.debug("initialized HBaseSession successfully")
+        sessionUsed = true
+        s
+      } catch {
+        case NonFatal(e) =>
+          // will be retried
+          if (log.isDebugEnabled)
+            log.debug("issue with initialization of CassandraSession, will be retried: {}", e.getMessage)
+          closeSession(underlying)
+          throw e
+      }
+    }
+  }
+
+  def session: Session = hbaseSession.underlying
+
+  private def closeSession(session: Session): Unit = try {
+    session.htable.close()
+    //CassandraMetricsRegistry(context.system).removeMetrics(metricsCategory)
+  } catch {
+    case NonFatal(_) => // nothing we can do
+  } finally {
+    session.client.shutdown()
+  }
+
+  override def preStart(): Unit = {
+    // eager initialization, but not from constructor
+    self ! HBaseAsyncWriteJournal.Init
+  }
+
+  override def receivePluginInternal: Receive = {
+    case WriteFinished(persistenceId, f) =>
+      writeInProgress.remove(persistenceId, f)
+    case HBaseAsyncWriteJournal.Init =>
+      try {
+        //hbaseSession
+      } catch {
+        case NonFatal(e) =>
+          log.warning(
+            "Failed to connect to Cassandra and initialize. It will be retried on demand. Caused by: {}",
+            e.getMessage)
+      }
+  }
+
+  override def postStop(): Unit = {
+    if (sessionUsed)
+      closeSession(session)
+    super.postStop()
+  }
+
   // journal plugin api impl -------------------------------------------------------------------------------------------
 
   override def asyncWriteMessages(messages: immutable.Seq[AtomicWrite]) /*: Future[Seq[Try[Unit]]]*/ = {
@@ -135,6 +207,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
 
     val p = Promise[Done]
     val pid = messages.head.persistenceId
+    writeInProgress.put(pid, p.future)
 
     Future(messages.map(serialize)).flatMap { serialized =>
       val result =
@@ -155,7 +228,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
 
       //log.debug("Putting into: {}", RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toKeyString)
       result.onComplete { _ =>
-        flushWrites()
+        session.flushWrites()
         self ! WriteFinished(pid, p.future)
         p.success(Done)
       }(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
@@ -174,12 +247,19 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
     val all = atomicWrites.flatMap(_.payload)
     val writes = all map { m =>
       val sequenceNr = m.sequenceNr
-      executePut(
-        RowKey(selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
+      session.executePut(
+        RowKey(session.selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
         Array(PersistenceId, SequenceNr, Marker, Message),
         Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), m.serialized.array))
     }
     Future.sequence(writes).map(_ => ())
+  }
+
+  override def asyncReadHighestSequenceNr(persistenceId: String, fromSequenceNr: Long): Future[Long] = {
+    writeInProgress.get(persistenceId) match {
+      case null => super.asyncReadHighestSequenceNr(persistenceId, fromSequenceNr)
+      case f    => f.flatMap(_ => super.asyncReadHighestSequenceNr(persistenceId, fromSequenceNr))
+    }
   }
 
   // todo should be optimised to do ranged deletes
@@ -187,26 +267,22 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
     val watch = Stopwatch.createStarted()
     log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive)", persistenceId, toSequenceNr)
 
-    // prepare delete function (delete or mark as deleted)
-    val permanent = true // TODO
-    val doDelete = deleteFunctionFor(permanent)
-
     def scanAndDeletePartition(part: Long, operator: ActorRef): Unit = {
-      val stopSequenceNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
-      val startScanKey = RowKey.firstInPartition(persistenceId, part) // 021-ID-000000000000000000
-      val stopScanKey = RowKey.lastInPartition(persistenceId, part, stopSequenceNr) // 021-ID-9223372036854775800
+      val toSeqNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
+      val startScanRow = RowKey.firstInPartition(persistenceId, part) // 021-ID-000000000000000000
+      val stopScanRow = RowKey.lastInPartition(persistenceId, part, toSeqNr) // 021-ID-9223372036854775800
       val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
 
       // we can avoid canning some partitions - guaranteed to be empty for smaller than the partition number seqNrs
       if (part > toSequenceNr)
         return
 
-      log.debug("Scanning for keys to delete, start: {}, stop: {}, regex: {}", startScanKey.toKeyString, stopScanKey.toKeyString, persistenceIdRowRegex)
+      log.debug("Scanning for keys to delete, start: {}, stop: {}, regex: {}", startScanRow.toKeyString, stopScanRow.toKeyString, persistenceIdRowRegex)
 
       val scan = new Scan
-      scan.setStartRow(startScanKey.toBytes)
-      scan.setStopRow(stopScanKey.toBytes)
-      scan.setBatch(hBasePersistenceSettings.scanBatchSize)
+      scan.setStartRow(startScanRow.toBytes)
+      scan.setStopRow(stopScanRow.toBytes)
+      scan.setBatch(config.scanBatchSize)
 
       val fl = new FilterList()
       fl.addFilter(new FirstKeyOnlyFilter)
@@ -214,7 +290,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
       fl.addFilter(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex)))
       scan.setFilter(fl)
 
-      val scanner = hTable.getScanner(scan)
+      val scanner = session.htable.getScanner(scan)
       try {
         var res = scanner.next()
         while (res != null) {
@@ -226,17 +302,16 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
       }
     }
 
-    val deleteRowsPromise = Promise[Unit]()
-    val operator = context.actorOf(Operator.props(deleteRowsPromise, doDelete, hBasePersistenceSettings.pluginDispatcherId))
+    val p = Promise[Unit]()
+    val operator = context.actorOf(Operator.props(p, session.deleteRow, config.pluginDispatcherId))
 
-    val partitions = hBasePersistenceSettings.partitionCount
+    val partitions = config.partitionCount
     val partitionScans = (1 to partitions).map(partitionNr => Future { scanAndDeletePartition(partitionNr, operator) })
     Future.sequence(partitionScans) onComplete { _ => operator ! AllOpsSubmitted }
 
-    deleteRowsPromise.future map {
-      case _ =>
-        log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {})", persistenceId, toSequenceNr, watch.stop())
-        if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
+    p.future map { _ =>
+      log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {})", persistenceId, toSequenceNr, watch.stop())
+      if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
     }
   }
 
@@ -245,20 +320,10 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery w
   private def confirmAsync(persistenceId: String, sequenceNr: Long, channelId: String): Future[Unit] = {
     log.debug(s"Confirming async for persistenceId: {}, sequenceNr: {} and channelId: {}", persistenceId, sequenceNr, channelId)
 
-    executePut(
+    session.executePut(
       RowKey(sequenceNr, persistenceId, sequenceNr).toBytes,
       Array(Marker),
       Array(confirmedMarkerBytes(channelId)))
-  }
-
-  private def deleteFunctionFor(permanent: Boolean): (Array[Byte]) => Future[Unit] = {
-    if (permanent) deleteRow
-    else markRowAsDeleted
-  }
-
-  override def postStop(): Unit = {
-    try hTable.close() finally client.shutdown()
-    super.postStop()
   }
 
   private lazy val transportInformation: Option[Serialization.Information] = {
