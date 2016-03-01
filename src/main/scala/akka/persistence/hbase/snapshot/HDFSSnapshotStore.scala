@@ -165,7 +165,8 @@ class HDFSSnapshotStore(settings: HBaseSnapshotConfig) extends SnapshotStore wit
   private def withStream[S <: Closeable, A](stream: S)(fun: S => A): A =
     try fun(stream) finally stream.close()
 
-  private def newHDFSPath(desc: HDFSSnapshotDescriptor) = new Path(settings.snapshotHdfsDir, desc.toFilename)
+  private def newHDFSPath(desc: HDFSSnapshotDescriptor) =
+    new Path(settings.snapshotHdfsDir, desc.toFilename)
 
   // TODO
   protected def deserialize(bytes: Array[Byte]): Try[Snapshot] =

@@ -4,7 +4,6 @@ import akka.Done
 import akka.actor.ActorLogging
 import akka.actor.ActorSystem
 import akka.actor.NoSerializationVerificationNeeded
-import akka.persistence.hbase.HBaseSerialization
 import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.Session
 import akka.persistence.hbase.SnapshotRowKey
@@ -12,7 +11,7 @@ import akka.persistence.hbase.TestingEventProtocol.DeletedSnapshotsFor
 import akka.persistence.hbase.journal._
 import akka.persistence.serialization.Snapshot
 import akka.persistence.snapshot.SnapshotStore
-import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria }
+import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria, PersistentRepr }
 import akka.serialization.SerializationExtension
 import com.stumbleupon.async.Callback
 import org.apache.hadoop.hbase.CellUtil
@@ -59,7 +58,7 @@ object HBaseSnapshotStore {
     }
   }
 }
-class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfig) extends SnapshotStore with ActorLogging with HBaseSerialization {
+class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfig) extends SnapshotStore with ActorLogging {
   import HBaseSnapshotStore._
 
   val serialization = SerializationExtension(context.system)
@@ -198,6 +197,19 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
   }
 
   // TODO
+
+  protected def snapshotFromBytes(bytes: Array[Byte]): Snapshot =
+    serialization.deserialize(bytes, classOf[Snapshot]).get
+
+  protected def snapshotToBytes(msg: Snapshot): Array[Byte] =
+    serialization.serialize(msg).get
+
+  protected def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
+    serialization.deserialize(bytes, classOf[PersistentRepr]).get
+
+  //protected def persistentToBytes(msg: Persistent): Array[Byte] =
+  // serialization.serialize(msg).get
+
   protected def deserialize(bytes: Array[Byte]): Try[Snapshot] =
     serialization.deserialize(bytes, classOf[Snapshot])
 
