@@ -23,9 +23,11 @@ import scala.collection.mutable
 import scala.collection.immutable
 import scala.concurrent.Future
 import scala.concurrent.Promise
+import scala.util.control.NonFatal
 import scala.util.{ Failure, Success, Try }
 
 object HBaseSnapshotStore {
+  private case object Init
 
   private case class WriteFinished(pid: String, f: Future[Done]) extends NoSerializationVerificationNeeded
 
@@ -75,18 +77,25 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
   import akka.persistence.hbase.Columns._
   import akka.persistence.hbase.journal.RowTypeMarkers._
 
+  override def preStart(): Unit = {
+    // eager initialization, but not from constructor
+    self ! HBaseSnapshotStore.Init
+  }
+
   override def receivePluginInternal: Receive = {
     case WriteFinished(persistenceId, f) =>
       writeInProgress.remove(persistenceId, f)
-    //    case HBaseAsyncWriteJournal.Init =>
-    //      try {
-    //        //hbaseSession
-    //      } catch {
-    //        case NonFatal(e) =>
-    //          log.warning(
-    //            "Failed to connect to Cassandra and initialize. It will be retried on demand. Caused by: {}",
-    //            e.getMessage)
-    //      }
+    case HBaseSnapshotStore.Init =>
+      try {
+        HBaseJournalInit.createTable(context.system.settings.config, config.snapshotTable, config.snapshotFamily)
+        //hbaseSession
+      } catch {
+        case NonFatal(e) =>
+          log.warning(
+            "Failed to connect to Cassandra and initialize. It will be retried on demand. Caused by: {}",
+            e.getMessage
+          )
+      }
   }
 
   def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
@@ -139,7 +148,8 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
         session.executePut(
           SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes,
           Array(Marker, Message),
-          Array(SnapshotMarkerBytes, serializedSnapshot))
+          Array(SnapshotMarkerBytes, serializedSnapshot)
+        )
 
       case Failure(ex) =>
         Future failed ex
