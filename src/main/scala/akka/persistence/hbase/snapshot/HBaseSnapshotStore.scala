@@ -93,8 +93,7 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
         case NonFatal(e) =>
           log.warning(
             "Failed to connect to Cassandra and initialize. It will be retried on demand. Caused by: {}",
-            e.getMessage
-          )
+            e.getMessage)
       }
   }
 
@@ -148,8 +147,7 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
         session.executePut(
           SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes,
           Array(Marker, Message),
-          Array(SnapshotMarkerBytes, serializedSnapshot)
-        )
+          Array(SnapshotMarkerBytes, serializedSnapshot))
 
       case Failure(ex) =>
         Future failed ex

@@ -4,7 +4,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hbase.client._
 import org.apache.hadoop.hbase.util.Bytes
 import com.typesafe.config._
-import org.apache.hadoop.hbase.{ HColumnDescriptor, HTableDescriptor }
+import org.apache.hadoop.hbase.{ HColumnDescriptor, HTableDescriptor, TableName }
 
 object HBaseJournalInit {
 
@@ -27,8 +27,9 @@ object HBaseJournalInit {
   private[hbase] def createTable(config: Config, table: String, family: String): Boolean = {
     val conf = getHBaseConfig(config)
     val admin = new HBaseAdmin(conf)
+    val tableName = TableName.valueOf(table)
 
-    try doInitTable(admin, table, family) finally admin.close()
+    try doInitTable(admin, tableName, family) finally admin.close()
   }
 
   /**
@@ -65,9 +66,9 @@ object HBaseJournalInit {
     try admin.deleteTable(table) finally admin.close()
   }
 
-  private def doInitTable(admin: HBaseAdmin, tableName: String, familyName: String): Boolean = {
+  private def doInitTable(admin: HBaseAdmin, tableName: TableName, familyName: String): Boolean = {
     if (admin.tableExists(tableName)) {
-      val tableDesc = admin.getTableDescriptor(toBytes(tableName))
+      val tableDesc = admin.getTableDescriptor(tableName)
       if (tableDesc.getFamily(toBytes(familyName)) == null) {
         // target family does not exists, will add it.
         admin.addColumn(familyName, new HColumnDescriptor(familyName))
@@ -77,7 +78,7 @@ object HBaseJournalInit {
         false
       }
     } else {
-      val tableDesc = new HTableDescriptor(toBytes(tableName))
+      val tableDesc = new HTableDescriptor(tableName)
       tableDesc.addFamily(new HColumnDescriptor(familyName))
 
       admin.createTable(tableDesc)

@@ -2,29 +2,35 @@ package akka.persistence.hbase
 
 import akka.persistence.hbase.journal.HBaseJournalConfig
 import org.apache.hadoop.hbase.util.Bytes
-import scala.annotation.tailrec
 
-case class RowKey(part: Long, persistenceId: String, sequenceNr: Long)(implicit val hBasePersistenceSettings: HBaseJournalConfig) {
+final case class RowKey(persistenceId: String, sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig) {
+  val partition = selectPartition(sequenceNr)
 
   def toBytes = Bytes.toBytes(toKeyString)
 
-  def toKeyString = s"${padded(part, 3)}-$persistenceId-${padded(sequenceNr, 20)}"
+  def toKeyString = s"${padded(partition, 3)}-$persistenceId-${padded(sequenceNr, RowKey.lengthSequenceNr)}"
 
-  @inline def padded(l: Long, howLong: Int) =
-    String.valueOf(l).reverse.padTo(howLong, "0").reverse.mkString
+  /** Used to avoid writing all data to the same region - see "hot region" problem */
+  private def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Int = {
+    (sequenceNr % journalConfig.partitionCount).toInt + 1
+  }
+
+  @inline
+  def padded(l: Long, howLong: Int) = String.valueOf(l).reverse.padTo(howLong, "0").reverse.mkString
 }
 
-case class SnapshotRowKey(persistenceId: String, sequenceNr: Long) {
+final case class SnapshotRowKey(persistenceId: String, sequenceNr: Long) {
 
   def toBytes = Bytes.toBytes(toKeyString)
 
-  def toKeyString = s"$persistenceId-${padded(sequenceNr, 20)}"
+  def toKeyString = s"$persistenceId-${padded(sequenceNr, RowKey.lengthSequenceNr)}"
 
-  @inline def padded(l: Long, howLong: Int) =
-    String.valueOf(l).reverse.padTo(howLong, "0").reverse.mkString
+  @inline
+  def padded(l: Long, howLong: Int) = String.valueOf(l).reverse.padTo(howLong, "0").reverse.mkString
 }
 
 object RowKey {
+  val lengthSequenceNr = 20
 
   /**
    * Since we're salting (prefixing) the entries with selectPartition numbers,
@@ -32,53 +38,34 @@ object RowKey {
    */
   def patternForProcessor(persistenceId: String)(implicit journalConfig: HBaseJournalConfig) = s""".*-$persistenceId-.*"""
 
-  def firstInPartition(persistenceId: String, partition: Long, fromSequenceNr: Long = 0)(implicit journalConfig: HBaseJournalConfig) = {
-    require(partition > 0, "partition must be > 0")
-    require(partition <= journalConfig.partitionCount, "partition must be <= partitionCount")
-
-    RowKey.apply(selectPartition(partition), persistenceId, fromSequenceNr)
+  def firstInPartition(persistenceId: String, fromSequenceNr: Long = 0)(implicit journalConfig: HBaseJournalConfig) = {
+    RowKey(persistenceId, fromSequenceNr)
   }
 
-  def lastInPartition(persistenceId: String, partition: Long, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: HBaseJournalConfig) = {
-    require(partition > 0, s"partition must be > 0, ($partition)")
-    require(partition <= journalConfig.partitionCount, s"partition must be <= partitionCount, ($partition <!= ${journalConfig.partitionCount})")
+  def lastInPartition(persistenceId: String, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: HBaseJournalConfig) = {
     require(toSequenceNr >= 0, s"toSequenceNr must be >= 0, ($toSequenceNr)")
-
-    new RowKey(selectPartition(partition), persistenceId, toSequenceNr)
+    RowKey(persistenceId, toSequenceNr)
   }
-
-  def lastInPartition(persistenceId: String, partition: Long)(implicit journalConfig: HBaseJournalConfig) = {
-    require(partition > 0, s"partition must be > 0, ($partition)")
-    require(partition <= journalConfig.partitionCount, s"partition must be <= partitionCount, ($partition <!= ${journalConfig.partitionCount})")
-
-    new RowKey(selectPartition(partition), persistenceId, lastSeqNrInPartition(partition))
-  }
-
-  /** First key possible, similar to: `000-id-000000000000000000000` */
-  def firstForPersistenceId(persistenceId: String)(implicit journalConfig: HBaseJournalConfig) =
-    RowKey(0, persistenceId, 0)
-
-  /** Last key possible, similar to: `999-id-Long.MaxValue` */
-  def lastForPersistenceId(persistenceId: String, toSequenceNr: Long = Long.MaxValue)(implicit journalConfig: HBaseJournalConfig) =
-    lastInPartition(persistenceId, selectPartition(journalConfig.partitionCount), toSequenceNr)
-
-  /** Used to avoid writing all data to the same region - see "hot region" problem */
-  def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Long =
-    if (sequenceNr % journalConfig.partitionCount == 0)
-      journalConfig.partitionCount
-    else
-      sequenceNr % journalConfig.partitionCount
 
   val RowKeyPattern = """\d+-.*-\d""".r
 
+  //val num = rowKey.reverse.takeWhile(_.toChar.isDigit).reverse 
   def extractSeqNr(rowKey: Array[Byte]): Long = {
-    val num = rowKey.reverse.takeWhile(_.toChar.isDigit).reverse // todo: make faster
+    var i = rowKey.length - 1
+    var n = lengthSequenceNr - 1
+    val num = Array.fill[Byte](lengthSequenceNr)(48) // filled with '0'
+    while (i >= 0 && n >= 0) {
+      val b = rowKey(i)
+      if (b >= 48 && b <= 57) { // '0' - '9'
+        num(n) = b
+        n -= 1
+        i -= 1
+      } else {
+        i = -1 // force to break
+      }
+    }
     Bytes.toString(num).toLong
   }
-
-  /** INTERNAL API */
-  @tailrec private[hbase] def lastSeqNrInPartition(p: Long, i: Long = Long.MaxValue): Long = if (i % p == 0) i else lastSeqNrInPartition(p, i - 1)
-
 }
 
 object SnapshotRowKey {

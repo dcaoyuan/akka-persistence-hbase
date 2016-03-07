@@ -23,10 +23,6 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
   val client = HBaseClientFactory.getClient(config)
   lazy val htable = new HTable(config.hadoopConfiguration, table)
 
-  /** Used to avoid writing all data to the same region - see "hot region" problem */
-  def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Long =
-    RowKey.selectPartition(sequenceNr)
-
   def isSnapshotRow(columns: Seq[KeyValue]): Boolean =
     java.util.Arrays.equals(findColumn(columns, Marker).value, SnapshotMarkerBytes)
 

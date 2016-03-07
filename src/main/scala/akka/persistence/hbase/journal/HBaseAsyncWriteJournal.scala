@@ -248,7 +248,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     val writes = all map { m =>
       val sequenceNr = m.sequenceNr
       session.executePut(
-        RowKey(session.selectPartition(sequenceNr), persistenceId, sequenceNr).toBytes,
+        RowKey(persistenceId, sequenceNr).toBytes,
         Array(PersistenceId, SequenceNr, Marker, Message),
         Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), m.serialized.array))
     }
@@ -267,10 +267,10 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     val watch = Stopwatch.createStarted()
     log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive)", persistenceId, toSequenceNr)
 
-    def scanAndDeletePartition(part: Long, operator: ActorRef): Unit = {
+    def scanAndDeletePartition(part: Int, operator: ActorRef): Unit = {
       val toSeqNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
-      val startScanRow = RowKey.firstInPartition(persistenceId, part) // 021-ID-000000000000000000
-      val stopScanRow = RowKey.lastInPartition(persistenceId, part, toSeqNr) // 021-ID-9223372036854775800
+      val startScanRow = RowKey.firstInPartition(persistenceId) // 021-ID-000000000000000000
+      val stopScanRow = RowKey.lastInPartition(persistenceId, toSeqNr) // 021-ID-9223372036854775800
       val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
 
       // we can avoid canning some partitions - guaranteed to be empty for smaller than the partition number seqNrs
@@ -321,7 +321,8 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     log.debug(s"Confirming async for persistenceId: {}, sequenceNr: {} and channelId: {}", persistenceId, sequenceNr, channelId)
 
     session.executePut(
-      RowKey(sequenceNr, persistenceId, sequenceNr).toBytes,
+      //RowKey(sequenceNr, persistenceId, sequenceNr).toBytes, // Old buggy code TODO to see if it cause old issues
+      RowKey(persistenceId, sequenceNr).toBytes,
       Array(Marker),
       Array(confirmedMarkerBytes(channelId)))
   }
