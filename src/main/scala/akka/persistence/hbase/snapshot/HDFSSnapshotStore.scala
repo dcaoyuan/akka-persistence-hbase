@@ -2,9 +2,9 @@ package akka.persistence.hbase.snapshot
 
 import akka.Done
 import akka.actor.ActorLogging
+import akka.actor.NoSerializationVerificationNeeded
 import akka.persistence.snapshot.SnapshotStore
 import akka.persistence.{ SelectedSnapshot, SnapshotSelectionCriteria, SnapshotMetadata }
-import akka.actor.NoSerializationVerificationNeeded
 import akka.persistence.serialization.Snapshot
 import akka.serialization.SerializationExtension
 import java.net.URI

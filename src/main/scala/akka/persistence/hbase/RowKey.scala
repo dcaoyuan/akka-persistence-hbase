@@ -12,7 +12,7 @@ final case class RowKey(persistenceId: String, sequenceNr: Long)(implicit journa
 
   /** Used to avoid writing all data to the same region - see "hot region" problem */
   private def selectPartition(sequenceNr: Long)(implicit journalConfig: HBaseJournalConfig): Int = {
-    (sequenceNr % journalConfig.partitionCount).toInt + 1
+    (sequenceNr % journalConfig.partitionCount).toInt + 1 // 1 ~ partitionCount
   }
 
   @inline

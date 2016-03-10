@@ -105,7 +105,7 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
       val stopScanKey = persistenceId
 
       val scan = session.preparePrefixScan(startScanKey.toBytes, Bytes.toBytes(stopScanKey), persistenceId, onlyRowKeys = false)
-      scan.addColumn(family, Message)
+      scan.addColumn(family, MESSAGE)
       scan.setReversed(true)
       scan.setMaxResultSize(1)
       val scanner = session.htable.getScanner(scan)
@@ -114,7 +114,7 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
         var res = scanner.next()
         while (res != null) {
           val seqNr = RowKey.extractSeqNr(res.getRow)
-          val messageCell = res.getColumnLatestCell(family, Message)
+          val messageCell = res.getColumnLatestCell(family, MESSAGE)
 
           val snapshot = snapshotFromBytes(CellUtil.cloneValue(messageCell))
 
@@ -146,7 +146,7 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
       case Success(serializedSnapshot) =>
         session.executePut(
           SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes,
-          Array(Marker, Message),
+          Array(MARKER, MESSAGE),
           Array(SnapshotMarkerBytes, serializedSnapshot))
 
       case Failure(ex) =>

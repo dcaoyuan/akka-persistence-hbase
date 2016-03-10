@@ -16,6 +16,7 @@ import akka.serialization.SerializationExtension
 import akka.serialization.SerializerWithStringManifest
 import com.google.common.base.Stopwatch
 import java.nio.ByteBuffer
+import org.apache.hadoop.hbase.client.Result
 import org.apache.hadoop.hbase.client.Scan
 import org.apache.hadoop.hbase.filter._
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
@@ -34,6 +35,13 @@ private[hbase] object HBaseAsyncWriteJournal {
   private case class SerializedAtomicWrite(persistenceId: String, payload: Seq[Serialized])
   private case class Serialized(persistenceId: String, sequenceNr: Long, serialized: ByteBuffer, tags: Set[String],
                                 eventManifest: String, serManifest: String, serId: Int, writerUuid: String)
+
+  def deserializeEvent(serialization: Serialization, row: Result, session: Session): Any = {
+    serialization.deserialize(
+      session.getValue(row, Columns.EVENT),
+      Bytes.toInt(session.getValue(row, Columns.SER_ID)),
+      Bytes.toString(session.getValue(row, Columns.SER_MANIFEST))).get
+  }
 }
 
 /**
@@ -57,7 +65,6 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
 
   import akka.persistence.hbase.Columns._
   import akka.persistence.hbase.DeferredConversions._
-  import org.apache.hadoop.hbase.util.Bytes._
 
   // readHighestSequence must be performed after pending write for a persistenceId
   // when the persistent actor is restarted.
@@ -249,8 +256,8 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
       val sequenceNr = m.sequenceNr
       session.executePut(
         RowKey(persistenceId, sequenceNr).toBytes,
-        Array(PersistenceId, SequenceNr, Marker, Message),
-        Array(toBytes(persistenceId), toBytes(sequenceNr), toBytes(AcceptedMarker), m.serialized.array))
+        Array(PERSISTENCE_ID, SEQUENCE_NR, MARKER, MESSAGE),
+        Array(Bytes.toBytes(persistenceId), Bytes.toBytes(sequenceNr), Bytes.toBytes(AcceptedMarker), m.serialized.array))
     }
     Future.sequence(writes).map(_ => ())
   }
@@ -292,10 +299,10 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
 
       val scanner = session.htable.getScanner(scan)
       try {
-        var res = scanner.next()
-        while (res != null) {
-          operator ! res.getRow
-          res = scanner.next()
+        var row = scanner.next()
+        while (row != null) {
+          operator ! row.getRow
+          row = scanner.next()
         }
       } finally {
         scanner.close()
@@ -323,7 +330,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     session.executePut(
       //RowKey(sequenceNr, persistenceId, sequenceNr).toBytes, // Old buggy code TODO to see if it cause old issues
       RowKey(persistenceId, sequenceNr).toBytes,
-      Array(Marker),
+      Array(MARKER),
       Array(confirmedMarkerBytes(channelId)))
   }
 

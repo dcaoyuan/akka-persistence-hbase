@@ -15,8 +15,7 @@ object HBaseClientFactory {
     // since we will be forcing a flush anyway after each batch, let's not make asyncbase flush more than it needs to.
     // for example, we tell akka "200", but asyncbase was set to "20", so it would flush way more often than we'd expect it to.
     // by setting the internal flushing to max(...), we're manually in hold of doing the flushing at the rigth moment.
-    val maxBatchSize = List(
-      config.maxMessageBatchSize).max.toShort
+    val maxBatchSize = List(config.maxMessageBatchSize).max.toShort // TODO
 
     val hbaseClient = client.get()
     hbaseClient.setFlushInterval(maxBatchSize.toShort)

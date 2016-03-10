@@ -6,8 +6,9 @@ import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.journal.Resequencer.AllPersistentsSubmitted
 import akka.persistence.journal._
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import org.apache.hadoop.hbase.CellUtil
+import org.apache.hadoop.hbase.client.Result
 import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.KeyValue
 import scala.collection.mutable
@@ -20,6 +21,7 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
 
   implicit val pluginDispatcher = context.system.dispatchers.lookup(replayDispatcherId)
 
+  import HBaseAsyncWriteJournal.deserializeEvent
   import akka.persistence.hbase.Columns._
 
   // async recovery plugin impl
@@ -92,44 +94,36 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
     }
 
     try {
-      var res = scanner.next()
-      while (res != null) {
+      var row = scanner.next()
+      while (row != null) {
         // Note: In case you wonder why we can't break the loop with a simple counter here once we loop through `max` elements:
         // Since this is multiple scans, on multiple partitions, they are not ordered, yet we must deliver ordered messages
         // to the receiver. Only the resequencer knows how many are really "delivered"
 
-        val markerCell = session.getColumnLatestCell(res, Marker)
-        val messageCell = session.getColumnLatestCell(res, Message)
+        val marker = session.getValue(row, MARKER)
+        val event = extractEvent(row)
+        extractMarker(row) match {
+          case "A" =>
+            resequenceMsg(event)
 
-        if ((markerCell ne null) && (messageCell ne null)) {
-          val marker = Bytes.toString(CellUtil.cloneValue(markerCell))
+          case "S" =>
+          // thanks to treating Snapshot rows as deleted entries, we won't suddenly apply a Snapshot() where the
+          // our Processor expects a normal message. This is implemented for the HBase backed snapshot storage,
+          // if you use the HDFS storage there won't be any snapshot entries in here.
+          // As for message deletes: if we delete msgs up to seqNr 4, and snapshot was at 3, we want to delete it anyway.
 
-          marker match {
-            case "A" =>
-              val persistentRepr = persistentFromBytes(CellUtil.cloneValue(messageCell))
-              resequenceMsg(persistentRepr)
+          case "D" =>
+            // mark as deleted, journal may choose to replay it
+            resequenceMsg(event.update(deleted = true))
 
-            case "S" =>
-            // thanks to treating Snapshot rows as deleted entries, we won't suddenly apply a Snapshot() where the
-            // our Processor expects a normal message. This is implemented for the HBase backed snapshot storage,
-            // if you use the HDFS storage there won't be any snapshot entries in here.
-            // As for message deletes: if we delete msgs up to seqNr 4, and snapshot was at 3, we want to delete it anyway.
+          case _ =>
+            // channel confirmation
 
-            case "D" =>
-              // mark as deleted, journal may choose to replay it
-              val persistentRepr = persistentFromBytes(CellUtil.cloneValue(messageCell))
-              resequenceMsg(persistentRepr.update(deleted = true))
-
-            case _ =>
-              // channel confirmation
-              val persistentRepr = persistentFromBytes(CellUtil.cloneValue(messageCell))
-
-              //val channelId = RowTypeMarkers.extractSeqNrFromConfirmedMarker(marker)
-              //replayCallback(persistentRepr.update(confirms = channelId +: persistentRepr.confirms))
-              replayCallback(persistentRepr)
-          }
+            //val channelId = RowTypeMarkers.extractSeqNrFromConfirmedMarker(marker)
+            //replayCallback(event.update(confirms = channelId +: event.confirms))
+            replayCallback(event)
         }
-        res = scanner.next()
+        row = scanner.next()
       }
       lowestSeqNr
     } catch {
@@ -184,13 +178,40 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
   //  end of async recovery plugin impl
 
   private def sequenceNr(columns: mutable.Buffer[KeyValue]): Long = {
-    val messageKeyValue = session.findColumn(columns, Message)
+    val messageKeyValue = session.findColumn(columns, MESSAGE)
     val msg = persistentFromBytes(messageKeyValue.value)
     msg.sequenceNr
   }
 
-  protected def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
+  private[this] def extractMarker(row: Result): String = {
+    session.getValue(row, MARKER) match {
+      case null => ""
+      case b    => Bytes.toString(b)
+    }
+  }
+
+  private[this] def extractEvent(row: Result): PersistentRepr =
+    session.getValue(row, MESSAGE) match {
+      case null =>
+        PersistentRepr(
+          payload = deserializeEvent(serialization, row, session),
+          sequenceNr = Bytes.toLong(session.getValue(row, SEQUENCE_NR)),
+          persistenceId = Bytes.toString(session.getValue(row, PERSISTENCE_ID)),
+          manifest = Bytes.toString(session.getValue(row, EVENT_MANIFEST)),
+          deleted = false,
+          sender = null,
+          writerUuid = Bytes.toString(session.getValue(row, WRITER_UUID)))
+      case b =>
+        // for backwards compatibility
+        serialization.deserialize(b, classOf[PersistentRepr]).get
+    }
+
+  private[this] def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
     serialization.deserialize(bytes, classOf[PersistentRepr]).get
+
+  private[this] def persistentFromByteBuffer(b: ByteBuffer): PersistentRepr =
+    serialization.deserialize(Bytes.getBytes(b), classOf[PersistentRepr]).get
+
 }
 
 /**

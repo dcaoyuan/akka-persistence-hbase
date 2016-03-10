@@ -106,6 +106,7 @@ object Dependencies {
     "com.typesafe.akka" %% "akka-actor" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-contrib" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-persistence" % AKKA_VERSION exclude ("org.iq80.leveldb", "leveldb"),
+    "com.typesafe.akka" %% "akka-persistence-query-experimental" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-slf4j" % AKKA_VERSION,
     "com.typesafe.akka" %% "akka-testkit" % AKKA_VERSION % Test,
     "com.typesafe.akka" %% "akka-multi-node-testkit" % AKKA_VERSION % Test,

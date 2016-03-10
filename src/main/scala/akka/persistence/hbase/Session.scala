@@ -2,7 +2,6 @@ package akka.persistence.hbase
 
 import akka.persistence.hbase.Columns._
 import akka.persistence.hbase.DeferredConversions._
-import akka.persistence.hbase.journal.HBaseJournalConfig
 import akka.persistence.hbase.journal.RowTypeMarkers._
 import org.apache.hadoop.hbase.client.HTable
 import org.apache.hadoop.hbase.client.Result
@@ -24,7 +23,7 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
   lazy val htable = new HTable(config.hadoopConfiguration, table)
 
   def isSnapshotRow(columns: Seq[KeyValue]): Boolean =
-    java.util.Arrays.equals(findColumn(columns, Marker).value, SnapshotMarkerBytes)
+    java.util.Arrays.equals(findColumn(columns, MARKER).value, SnapshotMarkerBytes)
 
   def findColumn(columns: Seq[KeyValue], qualifier: Array[Byte]): KeyValue =
     columns find { kv =>
@@ -37,6 +36,10 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
     result.getColumnLatestCell(family, qualifier)
   }
 
+  def getValue(result: Result, qualifier: Array[Byte]) = {
+    result.getValue(family, qualifier)
+  }
+
   def deleteRow(key: Array[Byte]): Future[Unit] = {
     //      println(s"Permanently deleting row: ${Bytes.toString(key)}")
     executeDelete(key)
@@ -44,7 +47,7 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
 
   def markRowAsDeleted(key: Array[Byte]): Future[Unit] = {
     //      println(s"Marking as deleted, for row: ${Bytes.toString(key)}")
-    executePut(key, Array(Marker), Array(DeletedMarkerBytes))
+    executePut(key, Array(MARKER), Array(DeletedMarkerBytes))
   }
 
   def executeDelete(key: Array[Byte]): Future[Unit] = {
@@ -85,8 +88,8 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
       fl.addFilter(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex)))
       fl
     } else {
-      scan.addColumn(family, Marker)
-      scan.addColumn(family, Message)
+      scan.addColumn(family, MARKER)
+      scan.addColumn(family, MESSAGE)
 
       new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex))
     }
