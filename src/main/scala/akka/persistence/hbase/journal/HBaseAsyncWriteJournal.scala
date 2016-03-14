@@ -23,7 +23,7 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp
 import org.apache.hadoop.hbase.util.Bytes
 import scala.collection.immutable
 import scala.concurrent._
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration._
 import scala.util.Try
 import scala.util.control.NonFatal
 
@@ -274,51 +274,53 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     val watch = Stopwatch.createStarted()
     log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive)", persistenceId, toSequenceNr)
 
-    def scanAndDeletePartition(part: Int, operator: ActorRef): Unit = {
-      val toSeqNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
-      val startScanRow = RowKey.firstInPartition(persistenceId) // 021-ID-000000000000000000
-      val stopScanRow = RowKey.lastInPartition(persistenceId, toSeqNr) // 021-ID-9223372036854775800
-      val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
-
-      // we can avoid canning some partitions - guaranteed to be empty for smaller than the partition number seqNrs
-      if (part > toSequenceNr)
-        return
-
-      log.debug("Scanning for keys to delete, start: {}, stop: {}, regex: {}", startScanRow.toKeyString, stopScanRow.toKeyString, persistenceIdRowRegex)
-
-      val scan = new Scan
-      scan.setStartRow(startScanRow.toBytes)
-      scan.setStopRow(stopScanRow.toBytes)
-      scan.setBatch(config.scanBatchSize)
-
-      val fl = new FilterList()
-      fl.addFilter(new FirstKeyOnlyFilter)
-      fl.addFilter(new KeyOnlyFilter)
-      fl.addFilter(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex)))
-      scan.setFilter(fl)
-
-      val scanner = session.htable.getScanner(scan)
-      try {
-        var row = scanner.next()
-        while (row != null) {
-          operator ! row.getRow
-          row = scanner.next()
-        }
-      } finally {
-        scanner.close()
-      }
-    }
-
     val p = Promise[Unit]()
     val operator = context.actorOf(Operator.props(p, session.deleteRow, config.pluginDispatcherId))
 
-    val partitions = config.partitionCount
-    val partitionScans = (1 to partitions).map(partitionNr => Future { scanAndDeletePartition(partitionNr, operator) })
+    val nPartitions = config.partitionCount
+    val partitionScans = (1 to nPartitions).map(partitionNr => Future {
+      scanAndDeletePartition(partitionNr, persistenceId, toSequenceNr, operator)
+    })
     Future.sequence(partitionScans) onComplete { _ => operator ! AllOpsSubmitted }
 
     p.future map { _ =>
       log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {})", persistenceId, toSequenceNr, watch.stop())
       if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
+    }
+  }
+
+  private def scanAndDeletePartition(part: Int, persistenceId: String, toSequenceNr: Long, operator: ActorRef): Unit = {
+    val toSeqNr = if (toSequenceNr < Long.MaxValue) toSequenceNr + 1 else Long.MaxValue
+    val startScanRow = RowKey.firstInPartition(persistenceId) // 021-ID-000000000000000000
+    val stopScanRow = RowKey.lastInPartition(persistenceId, toSeqNr) // 021-ID-9223372036854775800
+    val persistenceIdRowRegex = RowKey.patternForProcessor(persistenceId) //  .*-ID-.*
+
+    // we can avoid canning some partitions - guaranteed to be empty for smaller than the partition number seqNrs
+    if (part > toSequenceNr)
+      return
+
+    log.debug("Scanning for keys to delete, start: {}, stop: {}, regex: {}", startScanRow.toKeyString, stopScanRow.toKeyString, persistenceIdRowRegex)
+
+    val scan = new Scan
+    scan.setStartRow(startScanRow.toBytes)
+    scan.setStopRow(stopScanRow.toBytes)
+    scan.setBatch(config.scanBatchSize)
+
+    val fl = new FilterList()
+    fl.addFilter(new FirstKeyOnlyFilter)
+    fl.addFilter(new KeyOnlyFilter)
+    fl.addFilter(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex)))
+    scan.setFilter(fl)
+
+    val scanner = session.htable.getScanner(scan)
+    try {
+      var row = scanner.next()
+      while (row != null) {
+        operator ! row.getRow
+        row = scanner.next()
+      }
+    } finally {
+      scanner.close()
     }
   }
 
@@ -379,13 +381,16 @@ private[hbase] class Operator(finish: Promise[Unit], op: Array[Byte] => Future[U
   var processedOps: Long = 0 // how many ops are pending to finish (from hbase-land)
 
   var allOpsSubmitted = false // are we don submitting ops to be applied?
+  val timeout = 1000.seconds // TODO configurable
 
-  import akka.persistence.hbase.journal.Operator._
+  import Operator._
   import context.dispatcher
+
+  val timeoutTask = Some(context.system.scheduler.scheduleOnce(timeout, self, Timeout))
 
   def receive = {
     case key: Array[Byte] =>
-      //      log.debug("Scheduling op on: {}", Bytes.toString(key))
+      // log.debug("Scheduling op on: {}", Bytes.toString(key))
       totalOps += 1
       op(key) foreach { _ => self ! OpApplied(key) }
 
@@ -398,16 +403,33 @@ private[hbase] class Operator(finish: Promise[Unit], op: Array[Byte] => Future[U
 
       if (allOpsSubmitted && (processedOps == totalOps)) {
         log.debug("Finished processing all {} ops, shutting down operator.", totalOps)
-        finish.success(())
+        timeoutTask foreach { _.cancel }
+        finish.success(Done)
         context stop self
       }
+
+    case Timeout =>
+      if (allOpsSubmitted) {
+        if (processedOps != totalOps) {
+          log.error("Failed to processing operator - timeout with allOpsSubmitted={}, processedOps={}, totalOps={}", allOpsSubmitted, processedOps, totalOps)
+          finish.failure(new RuntimeException(s"Failed to processing operator - timeout with allOpsSubmitted=${allOpsSubmitted}, processedOps=${processedOps}, totalOps=${totalOps}"))
+        } else {
+          finish.success(Done)
+        }
+      } else {
+        log.error("Failed to processing operator - timeout with allOpsSubmitted={}, processedOps={}, totalOps={}", allOpsSubmitted, processedOps, totalOps)
+        finish.failure(new RuntimeException(s"Failed to processing operator - timeout with allOpsSubmitted=${allOpsSubmitted}, processedOps=${processedOps}, totalOps=${totalOps}"))
+      }
+
+      context stop self
   }
 }
-object Operator {
 
+object Operator {
   def props(deleteRowsPromise: Promise[Unit], doDelete: Array[Byte] => Future[Unit], dispatcher: String): Props =
     Props(classOf[Operator], deleteRowsPromise, doDelete).withDispatcher(dispatcher)
 
-  final case class OpApplied(row: Array[Byte])
+  case object Timeout
   case object AllOpsSubmitted
+  final case class OpApplied(row: Array[Byte])
 }

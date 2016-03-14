@@ -13,6 +13,7 @@ import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.KeyValue
 import scala.collection.mutable
 import scala.concurrent.{ Future, Promise }
+import scala.concurrent.duration._
 
 trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
   this: HBaseAsyncWriteJournal =>
@@ -27,21 +28,24 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
   // async recovery plugin impl
 
   override def asyncReplayMessages(
-    persistenceId: String,
+    persistenceId:  String,
     fromSequenceNr: Long,
-    toSequenceNr: Long,
-    max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
+    toSequenceNr:   Long,
+    max:            Long
+  )(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
     case 0 =>
       log.debug(
         "Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
-        persistenceId, fromSequenceNr, toSequenceNr)
+        persistenceId, fromSequenceNr, toSequenceNr
+      )
 
       Future.successful(()) // no need to do a replay anything
 
     case _ =>
       log.debug(
         "Async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}]{}",
-        persistenceId, fromSequenceNr, toSequenceNr, if (max != Long.MaxValue) s", limited to: $max messages" else "")
+        persistenceId, fromSequenceNr, toSequenceNr, if (max != Long.MaxValue) s", limited to: $max messages" else ""
+      )
 
       val reachedSeqNrPromise = Promise[Long]()
       val loopedMaxFlag = new AtomicBoolean(false) // the resequencer may let us know that it looped `max` messages, and we can abort further scanning
@@ -55,9 +59,9 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
           val seqNrs = lowestSeqNrInEachPartition.filterNot(_ == 0L).toList
 
           if (seqNrs.nonEmpty)
-            resequencer ! AllPersistentsSubmitted(assumeSequenceStartsAt = seqNrs.min)
+            resequencer ! AllPersistentsSubmitted(seqNrs.min)
           else
-            resequencer ! AllPersistentsSubmitted(assumeSequenceStartsAt = 0)
+            resequencer ! AllPersistentsSubmitted(0)
       }
 
       reachedSeqNrPromise.future map {
@@ -200,7 +204,8 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
           manifest = Bytes.toString(session.getValue(row, EVENT_MANIFEST)),
           deleted = false,
           sender = null,
-          writerUuid = Bytes.toString(session.getValue(row, WRITER_UUID)))
+          writerUuid = Bytes.toString(session.getValue(row, WRITER_UUID))
+        )
       case b =>
         // for backwards compatibility
         serialization.deserialize(b, classOf[PersistentRepr]).get
@@ -227,12 +232,13 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
  * @param sequenceStartsAt since we support partial replays (from 4 to 100), the resequencer must know when to start replaying
  */
 private[hbase] class Resequencer(
-    persistenceId: String,
+    persistenceId:     String,
     _sequenceStartsAt: Long,
     maxMsgsToSequence: Long,
-    replayCallback: PersistentRepr => Unit,
-    loopedMaxFlag: AtomicBoolean,
-    reachedSeqNr: Promise[Long]) extends Actor with ActorLogging {
+    replayCallback:    PersistentRepr => Unit,
+    loopedMaxFlag:     AtomicBoolean,
+    reachedSeqNr:      Promise[Long]
+) extends Actor with ActorLogging {
 
   implicit lazy val config = new HBaseJournalConfig(context.system.settings.config)
 
@@ -241,10 +247,13 @@ private[hbase] class Resequencer(
   private var sequenceStartsAt: Long = _sequenceStartsAt
   private var deliveredSeqNr = sequenceStartsAt - 1
   private def deliveredMsgs = deliveredSeqNr - sequenceStartsAt + 1
+  val timeout = 1000.seconds // TODO configurable
+
+  import Resequencer._
+  import context.dispatcher
 
   private val delayed = mutable.Map.empty[Long, PersistentRepr]
-
-  import akka.persistence.hbase.journal.Resequencer._
+  val timeoutTask = Some(context.system.scheduler.scheduleOnce(timeout, self, Timeout))
 
   def receive = {
     case p: PersistentRepr =>
@@ -263,11 +272,14 @@ private[hbase] class Resequencer(
       }
 
       if (delayed.isEmpty) {
-        completeResequencing()
+        successResequencing()
       } else {
         allSubmitted = true
-        failResequencing(delayed)
+        failureResequencing(delayed)
       }
+
+    case Timeout =>
+      failureResequencing(delayed)
   }
 
   @scala.annotation.tailrec
@@ -281,9 +293,9 @@ private[hbase] class Resequencer(
         delayed.clear()
         loopedMaxFlag set true
 
-        completeResequencing()
+        successResequencing()
       } else if (allSubmitted && delayed.isEmpty) {
-        completeResequencing()
+        successResequencing()
       }
     } else {
       delayed += (p.sequenceNr -> p)
@@ -293,18 +305,20 @@ private[hbase] class Resequencer(
     if (ro.isDefined) resequence(ro.get)
   }
 
-  private def completeResequencing() {
+  private def successResequencing() {
     log.debug("All messages have been resequenced and applied (until seqNr: {}, nr of messages: {})!", deliveredSeqNr, deliveredMsgs)
+    timeoutTask foreach { _.cancel }
     reachedSeqNr success deliveredSeqNr
     context stop self
   }
 
-  private def failResequencing(delayed: collection.Map[Long, PersistentRepr]) {
+  private def failureResequencing(delayed: collection.Map[Long, PersistentRepr]) {
     log.error(
       "All persistents submitted but delayed is not empty, some messages must fail to replay: {}",
       delayed.keys.map { sequenceNr =>
         RowKey(persistenceId, sequenceNr).toKeyString
-      }.mkString(", "))
+      }.mkString(", ")
+    )
     reachedSeqNr failure new IOException("Failed to complete resequence replay msgs.")
     context stop self
   }
@@ -315,5 +329,6 @@ private[hbase] object Resequencer {
   def props(persistenceId: String, sequenceStartsAt: Long, maxMsgsToSequence: Long, replayCallback: PersistentRepr => Unit, loopedMaxFlag: AtomicBoolean, reachedSeqNr: Promise[Long], dispatcherId: String) =
     Props(classOf[Resequencer], persistenceId, sequenceStartsAt, maxMsgsToSequence, replayCallback, loopedMaxFlag, reachedSeqNr).withDispatcher(dispatcherId) // todo stop it at some point
 
+  case object Timeout
   final case class AllPersistentsSubmitted(assumeSequenceStartsAt: Long)
 }
