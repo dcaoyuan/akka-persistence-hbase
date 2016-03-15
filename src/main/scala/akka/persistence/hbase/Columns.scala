@@ -13,4 +13,5 @@ object Columns {
   val SER_MANIFEST = toBytes("ser_manifest")
   val EVENT_MANIFEST = toBytes("event_manifest")
   val WRITER_UUID = toBytes("writer_uuid")
+  val SNAPSHOT_DATA = toBytes("snapshot_data")
 }

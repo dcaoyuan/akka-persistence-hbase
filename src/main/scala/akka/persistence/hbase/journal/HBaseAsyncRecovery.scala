@@ -2,15 +2,15 @@ package akka.persistence.hbase.journal
 
 import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.persistence.PersistentRepr
+import akka.persistence.hbase.Columns
 import akka.persistence.hbase.RowKey
+import akka.persistence.hbase.Session
 import akka.persistence.hbase.journal.Resequencer.AllPersistentsSubmitted
 import akka.persistence.journal._
 import java.io.IOException
-import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import org.apache.hadoop.hbase.client.Result
 import org.apache.hadoop.hbase.util.Bytes
-import org.hbase.async.KeyValue
 import scala.collection.mutable
 import scala.concurrent.{ Future, Promise }
 import scala.concurrent.duration._
@@ -22,30 +22,26 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
 
   implicit val pluginDispatcher = context.system.dispatchers.lookup(replayDispatcherId)
 
-  import HBaseAsyncWriteJournal.deserializeEvent
   import akka.persistence.hbase.Columns._
 
   // async recovery plugin impl
 
   override def asyncReplayMessages(
-    persistenceId:  String,
+    persistenceId: String,
     fromSequenceNr: Long,
-    toSequenceNr:   Long,
-    max:            Long
-  )(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
+    toSequenceNr: Long,
+    max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = max match {
     case 0 =>
       log.debug(
         "Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
-        persistenceId, fromSequenceNr, toSequenceNr
-      )
+        persistenceId, fromSequenceNr, toSequenceNr)
 
       Future.successful(()) // no need to do a replay anything
 
     case _ =>
       log.debug(
         "Async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}]{}",
-        persistenceId, fromSequenceNr, toSequenceNr, if (max != Long.MaxValue) s", limited to: $max messages" else ""
-      )
+        persistenceId, fromSequenceNr, toSequenceNr, if (max != Long.MaxValue) s", limited to: $max messages" else "")
 
       val reachedSeqNrPromise = Promise[Long]()
       val loopedMaxFlag = new AtomicBoolean(false) // the resequencer may let us know that it looped `max` messages, and we can abort further scanning
@@ -181,12 +177,6 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
   }
   //  end of async recovery plugin impl
 
-  private def sequenceNr(columns: mutable.Buffer[KeyValue]): Long = {
-    val messageKeyValue = session.findColumn(columns, MESSAGE)
-    val msg = persistentFromBytes(messageKeyValue.value)
-    msg.sequenceNr
-  }
-
   private[this] def extractMarker(row: Result): String = {
     session.getValue(row, MARKER) match {
       case null => ""
@@ -198,24 +188,24 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
     session.getValue(row, MESSAGE) match {
       case null =>
         PersistentRepr(
-          payload = deserializeEvent(serialization, row, session),
+          payload = deserializeEvent(row, session),
           sequenceNr = Bytes.toLong(session.getValue(row, SEQUENCE_NR)),
           persistenceId = Bytes.toString(session.getValue(row, PERSISTENCE_ID)),
           manifest = Bytes.toString(session.getValue(row, EVENT_MANIFEST)),
           deleted = false,
           sender = null,
-          writerUuid = Bytes.toString(session.getValue(row, WRITER_UUID))
-        )
-      case b =>
+          writerUuid = Bytes.toString(session.getValue(row, WRITER_UUID)))
+      case bytes =>
         // for backwards compatibility
-        serialization.deserialize(b, classOf[PersistentRepr]).get
+        serialization.deserialize(bytes, classOf[PersistentRepr]).get
     }
 
-  private[this] def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
-    serialization.deserialize(bytes, classOf[PersistentRepr]).get
-
-  private[this] def persistentFromByteBuffer(b: ByteBuffer): PersistentRepr =
-    serialization.deserialize(Bytes.getBytes(b), classOf[PersistentRepr]).get
+  private def deserializeEvent(row: Result, session: Session): Any = {
+    serialization.deserialize(
+      session.getValue(row, EVENT),
+      Bytes.toInt(session.getValue(row, SER_ID)),
+      Bytes.toString(session.getValue(row, SER_MANIFEST))).get
+  }
 
 }
 
@@ -232,13 +222,12 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
  * @param sequenceStartsAt since we support partial replays (from 4 to 100), the resequencer must know when to start replaying
  */
 private[hbase] class Resequencer(
-    persistenceId:     String,
+    persistenceId: String,
     _sequenceStartsAt: Long,
     maxMsgsToSequence: Long,
-    replayCallback:    PersistentRepr => Unit,
-    loopedMaxFlag:     AtomicBoolean,
-    reachedSeqNr:      Promise[Long]
-) extends Actor with ActorLogging {
+    replayCallback: PersistentRepr => Unit,
+    loopedMaxFlag: AtomicBoolean,
+    reachedSeqNr: Promise[Long]) extends Actor with ActorLogging {
 
   implicit lazy val config = new HBaseJournalConfig(context.system.settings.config)
 
@@ -317,8 +306,7 @@ private[hbase] class Resequencer(
       "All persistents submitted but delayed is not empty, some messages must fail to replay: {}",
       delayed.keys.map { sequenceNr =>
         RowKey(persistenceId, sequenceNr).toKeyString
-      }.mkString(", ")
-    )
+      }.mkString(", "))
     reachedSeqNr failure new IOException("Failed to complete resequence replay msgs.")
     context stop self
   }

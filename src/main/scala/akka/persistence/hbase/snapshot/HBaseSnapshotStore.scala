@@ -1,9 +1,8 @@
 package akka.persistence.hbase.snapshot
 
-import akka.Done
 import akka.actor.ActorLogging
 import akka.actor.ActorSystem
-import akka.actor.NoSerializationVerificationNeeded
+import akka.actor.ExtendedActorSystem
 import akka.persistence.hbase.RowKey
 import akka.persistence.hbase.Session
 import akka.persistence.hbase.SnapshotRowKey
@@ -12,9 +11,12 @@ import akka.persistence.hbase.journal._
 import akka.persistence.serialization.Snapshot
 import akka.persistence.snapshot.SnapshotStore
 import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria, PersistentRepr }
+import akka.serialization.Serialization
 import akka.serialization.SerializationExtension
+import akka.serialization.SerializerWithStringManifest
 import com.stumbleupon.async.Callback
-import org.apache.hadoop.hbase.CellUtil
+import java.nio.ByteBuffer
+import org.apache.hadoop.hbase.client.Result
 import org.apache.hadoop.hbase.util.Bytes
 import org.hbase.async.KeyValue
 import org.hbase.async.Scanner
@@ -24,12 +26,11 @@ import scala.collection.immutable
 import scala.concurrent.Future
 import scala.concurrent.Promise
 import scala.util.control.NonFatal
-import scala.util.{ Failure, Success, Try }
 
-object HBaseSnapshotStore {
+private[snapshot] object HBaseSnapshotStore {
   private case object Init
 
-  private case class WriteFinished(pid: String, f: Future[Done]) extends NoSerializationVerificationNeeded
+  private case class Serialized(serialized: ByteBuffer, serManifest: String, serId: Int)
 
   final class RecursiveScannerResultHandler(scanner: Scanner, promise: Promise[Seq[java.util.ArrayList[KeyValue]]]) extends Callback[AnyRef, java.util.ArrayList[java.util.ArrayList[KeyValue]]] {
 
@@ -71,9 +72,6 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
   val family = Bytes.toBytes(config.snapshotFamily)
   val session = new Session(table, family, config)
 
-  /** Snapshots we're in progress of saving */
-  private val writeInProgress = new java.util.HashMap[String, Future[Done]]()
-
   import akka.persistence.hbase.Columns._
   import akka.persistence.hbase.journal.RowTypeMarkers._
 
@@ -83,8 +81,6 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
   }
 
   override def receivePluginInternal: Receive = {
-    case WriteFinished(persistenceId, f) =>
-      writeInProgress.remove(persistenceId, f)
     case HBaseSnapshotStore.Init =>
       try {
         HBaseJournalInit.createTable(context.system.settings.config, config.snapshotTable, config.snapshotFamily)
@@ -100,72 +96,63 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
   def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
     log.debug("Loading async for persistenceId: [{}] on criteria: {}", persistenceId, criteria)
 
-    def scanPartition(): Option[SelectedSnapshot] = {
-      val startScanKey = SnapshotRowKey.lastForPersistenceId(persistenceId, toSequenceNr = criteria.maxSequenceNr)
-      val stopScanKey = persistenceId
-
-      val scan = session.preparePrefixScan(startScanKey.toBytes, Bytes.toBytes(stopScanKey), persistenceId, onlyRowKeys = false)
-      scan.addColumn(family, MESSAGE)
-      scan.setReversed(true)
-      scan.setMaxResultSize(1)
-      val scanner = session.htable.getScanner(scan)
-
-      try {
-        var res = scanner.next()
-        while (res != null) {
-          val seqNr = RowKey.extractSeqNr(res.getRow)
-          val messageCell = res.getColumnLatestCell(family, MESSAGE)
-
-          val snapshot = snapshotFromBytes(CellUtil.cloneValue(messageCell))
-
-          if (seqNr <= criteria.maxSequenceNr)
-            return Some(SelectedSnapshot(SnapshotMetadata(persistenceId, seqNr), snapshot.data)) // todo timestamp)
-
-          res = scanner.next()
-        }
-
-        None
-      } finally {
-        scanner.close()
-      }
-    }
-
-    val f = Future(scanPartition())
+    val f = Future(scanPartition(persistenceId, criteria))
     f onFailure { case x => log.error(x, "Unable to read snapshot for persistenceId: {}, on criteria: {}", persistenceId, criteria) }
     f
   }
 
-  def saveAsync(meta: SnapshotMetadata, snapshot: Any): Future[Unit] = {
-    log.debug("Saving async, of {}", meta)
+  private def scanPartition(persistenceId: String, criteria: SnapshotSelectionCriteria): Option[SelectedSnapshot] = {
+    val startScanKey = SnapshotRowKey.lastForPersistenceId(persistenceId, toSequenceNr = criteria.maxSequenceNr)
+    val stopScanKey = persistenceId
 
-    val p = Promise[Done]
-    val pid = meta.persistenceId
-    writeInProgress.put(pid, p.future)
+    val scan = session.preparePrefixScan(startScanKey.toBytes, Bytes.toBytes(stopScanKey), persistenceId, onlyRowKeys = false)
+    scan.addColumn(family, MESSAGE)
+    scan.addColumn(family, SNAPSHOT_DATA)
+    scan.setReversed(true)
+    scan.setMaxResultSize(1)
+    val scanner = session.htable.getScanner(scan)
 
-    val f = serialize(Snapshot(snapshot)) match {
-      case Success(serializedSnapshot) =>
-        session.executePut(
-          SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes,
-          Array(MARKER, MESSAGE),
-          Array(SnapshotMarkerBytes, serializedSnapshot))
+    try {
+      var res = scanner.next()
+      while (res != null) {
+        val seqNr = RowKey.extractSeqNr(res.getRow)
+        val snapshot = extractSnapshot(res)
+        if (seqNr <= criteria.maxSequenceNr) {
+          return Some(SelectedSnapshot(SnapshotMetadata(persistenceId, seqNr), snapshot.data)) // todo timestamp)
+        }
 
-      case Failure(ex) =>
-        Future failed ex
+        res = scanner.next()
+      }
+
+      None
+    } finally {
+      scanner.close()
     }
-    f.onComplete { _ =>
-      log.debug("Saved: {}", meta)
-      self ! WriteFinished(pid, p.future)
-      p.success(Done)
-    }(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
+  }
 
-    f
+  def saveAsync(metadata: SnapshotMetadata, snapshot: Any): Future[Unit] = {
+    Future(serializeSnapshot(snapshot)).flatMap { ser =>
+      session.executePut(
+        SnapshotRowKey(metadata.persistenceId, metadata.sequenceNr).toBytes,
+        Array(
+          MARKER,
+          PERSISTENCE_ID,
+          SEQUENCE_NR,
+          SER_ID,
+          SER_MANIFEST,
+          MESSAGE),
+        Array(
+          SnapshotMarkerBytes,
+          Bytes.toBytes(metadata.persistenceId),
+          Bytes.toBytes(metadata.sequenceNr),
+          Bytes.toBytes(ser.serId),
+          Bytes.toBytes(ser.serManifest),
+          ser.serialized.array))
+    }
   }
 
   def deleteAsync(meta: SnapshotMetadata): Future[Unit] = {
     log.debug("Deleting snapshot for meta: {}", meta)
-
-    val pid = meta.persistenceId
-    writeInProgress.remove(pid)
     session.executeDelete(SnapshotRowKey(meta.persistenceId, meta.sequenceNr).toBytes)
   }
 
@@ -204,23 +191,47 @@ class HBaseSnapshotStore(val system: ActorSystem, val config: HBaseSnapshotConfi
 
   }
 
-  // TODO
+  private lazy val transportInformation: Option[Serialization.Information] = {
+    val address = context.system.asInstanceOf[ExtendedActorSystem].provider.getDefaultAddress
+    if (address.hasLocalScope) None
+    else Some(Serialization.Information(address, context.system))
+  }
 
-  protected def snapshotFromBytes(bytes: Array[Byte]): Snapshot =
-    serialization.deserialize(bytes, classOf[Snapshot]).get
+  private def serializeSnapshot(payload: Any): Serialized = {
+    def doSerializeSnapshot(): Serialized = {
+      val snapshot: AnyRef = payload.asInstanceOf[AnyRef]
+      val serializer = serialization.findSerializerFor(snapshot)
+      val serManifest = serializer match {
+        case ser2: SerializerWithStringManifest =>
+          ser2.manifest(snapshot)
+        case _ =>
+          if (serializer.includeManifest) snapshot.getClass.getName
+          else PersistentRepr.Undefined
+      }
+      val serPayload = ByteBuffer.wrap(serialization.serialize(snapshot).get)
+      Serialized(serPayload, serManifest, serializer.identifier)
+    }
 
-  protected def snapshotToBytes(msg: Snapshot): Array[Byte] =
-    serialization.serialize(msg).get
+    // serialize actor references with full address information (defaultAddress)
+    transportInformation match {
+      case Some(ti) => Serialization.currentTransportInformation.withValue(ti) { doSerializeSnapshot() }
+      case None     => doSerializeSnapshot()
+    }
+  }
 
-  protected def persistentFromBytes(bytes: Array[Byte]): PersistentRepr =
-    serialization.deserialize(bytes, classOf[PersistentRepr]).get
+  private[this] def extractSnapshot(row: Result): Snapshot =
+    session.getValue(row, MESSAGE) match {
+      case null =>
+        Snapshot(deserializeSnapshot(row, session))
+      case bytes =>
+        // for backwards compatibility
+        serialization.deserialize(bytes, classOf[Snapshot]).get
+    }
 
-  //protected def persistentToBytes(msg: Persistent): Array[Byte] =
-  // serialization.serialize(msg).get
-
-  protected def deserialize(bytes: Array[Byte]): Try[Snapshot] =
-    serialization.deserialize(bytes, classOf[Snapshot])
-
-  protected def serialize(snapshot: Snapshot): Try[Array[Byte]] =
-    serialization.serialize(snapshot)
+  private def deserializeSnapshot(row: Result, session: Session): Any = {
+    serialization.deserialize(
+      session.getValue(row, SNAPSHOT_DATA),
+      Bytes.toInt(session.getValue(row, SER_ID)),
+      Bytes.toString(session.getValue(row, SER_MANIFEST))).get
+  }
 }

@@ -14,7 +14,6 @@ import akka.persistence.{ PersistentRepr, AtomicWrite }
 import akka.serialization.Serialization
 import akka.serialization.SerializationExtension
 import akka.serialization.SerializerWithStringManifest
-import com.google.common.base.Stopwatch
 import java.nio.ByteBuffer
 import org.apache.hadoop.hbase.client.Result
 import org.apache.hadoop.hbase.client.Scan
@@ -36,12 +35,6 @@ private[hbase] object HBaseAsyncWriteJournal {
   private case class Serialized(persistenceId: String, sequenceNr: Long, serialized: ByteBuffer, tags: Set[String],
                                 eventManifest: String, serManifest: String, serId: Int, writerUuid: String)
 
-  def deserializeEvent(serialization: Serialization, row: Result, session: Session): Any = {
-    serialization.deserialize(
-      session.getValue(row, Columns.EVENT),
-      Bytes.toInt(session.getValue(row, Columns.SER_ID)),
-      Bytes.toString(session.getValue(row, Columns.SER_MANIFEST))).get
-  }
 }
 
 /**
@@ -209,7 +202,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     }
 
     log.debug(s"Write async for {} presistent messages", messages.size)
-    val watch = Stopwatch.createStarted()
+    val watch = System.currentTimeMillis
     val maxMessageBatchSize = 100
 
     val p = Promise[Done]
@@ -240,7 +233,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
         p.success(Done)
       }(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
 
-      log.debug("Completed writing {} messages (took: {})", messages.size, watch.stop()) // todo better failure / success?
+      log.debug("Completed writing {} messages (took: {}ms)", messages.size, System.currentTimeMillis - watch) // todo better failure / success?
       if (publishTestingEvents) context.system.eventStream.publish(FinishedWrites(messages.size))
 
       publishTagNotification(serialized, result)
@@ -271,7 +264,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
 
   // todo should be optimised to do ranged deletes
   override def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] = {
-    val watch = Stopwatch.createStarted()
+    val watch = System.currentTimeMillis
     log.debug(s"AsyncDeleteMessagesTo for persistenceId: {} to sequenceNr: {} (inclusive)", persistenceId, toSequenceNr)
 
     val p = Promise[Unit]()
@@ -284,7 +277,7 @@ class HBaseAsyncWriteJournal extends AsyncWriteJournal with HBaseAsyncRecovery {
     Future.sequence(partitionScans) onComplete { _ => operator ! AllOpsSubmitted }
 
     p.future map { _ =>
-      log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {})", persistenceId, toSequenceNr, watch.stop())
+      log.debug("Finished deleting messages for persistenceId: {}, to sequenceNr: {}, (took: {}ms)", persistenceId, toSequenceNr, System.currentTimeMillis - watch)
       if (publishTestingEvents) context.system.eventStream.publish(FinishedDeletes(toSequenceNr))
     }
   }

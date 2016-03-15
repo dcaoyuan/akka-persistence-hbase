@@ -90,6 +90,7 @@ class Session(table: Array[Byte], family: Array[Byte], config: HBasePluginConfig
     } else {
       scan.addColumn(family, MARKER)
       scan.addColumn(family, MESSAGE)
+      scan.addColumn(family, EVENT)
 
       new RowFilter(CompareOp.EQUAL, new RegexStringComparator(persistenceIdRowRegex))
     }
