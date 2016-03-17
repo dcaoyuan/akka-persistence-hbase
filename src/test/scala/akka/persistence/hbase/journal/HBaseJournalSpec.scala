@@ -1,16 +1,16 @@
 package akka.persistence.hbase.journal
 
-import akka.actor.{ActorLogging, ActorRef, ActorSystem, Props}
+import akka.actor.{ ActorLogging, ActorRef, ActorSystem, Props }
 import akka.persistence._
 import akka.persistence.hbase.HBaseClientFactory
 import akka.persistence.hbase.TestingEventProtocol.FinishedDeletes
 import akka.persistence.hbase.snapshot.HBaseSnapshotConfig
-import akka.testkit.{ImplicitSender, TestKit, TestProbe}
+import akka.testkit.{ ImplicitSender, TestKit, TestProbe }
 import org.scalatest._
 
 import scala.concurrent.duration._
 
-object HBaseAsyncJournalSpec {
+object HBaseJournalSpec {
 
   case class DeleteUntil(sequenceNr: Long, permanent: Boolean)
 
@@ -24,18 +24,18 @@ object HBaseAsyncJournalSpec {
       case RecoveryCompleted => // do nothing...
 
       case payload if recoveryRunning =>
-        log.debug("Recovering, got [{}] @ {} ({})", payload, currentPersistentMessage.map(_.sequenceNr).get, getCurrentPersistentMessage)
+        log.debug("Recovering, got [{}] @ {}", payload, lastSequenceNr)
         testActor ! payload
-        testActor ! currentPersistentMessage.map(_.sequenceNr).get
+        testActor ! lastSequenceNr
         testActor ! recoveryRunning
 
       case payload =>
         log.debug("Got payload {}, persisting...", payload)
 
         persist(payload) { p =>
-          log.debug("Not in recovery, got [{}] @ {}", payload, currentPersistentMessage.map(_.sequenceNr).get)
+          log.debug("Not in recovery, got [{}] @ {}", payload, lastSequenceNr)
           testActor ! payload
-          testActor ! currentPersistentMessage.map(_.sequenceNr).get
+          testActor ! lastSequenceNr
           testActor ! recoveryRunning
         }
     }
@@ -47,10 +47,10 @@ object HBaseAsyncJournalSpec {
 
 }
 
-class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSender with FlatSpecLike
-  with Matchers with BeforeAndAfterAll {
+class HBaseJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSender with FlatSpecLike
+    with Matchers with BeforeAndAfterAll {
 
-  import akka.persistence.hbase.journal.HBaseAsyncJournalSpec._
+  import HBaseJournalSpec._
 
   val config = system.settings.config
 
@@ -150,17 +150,16 @@ class HBaseAsyncJournalSpec extends TestKit(ActorSystem("test")) with ImplicitSe
     val p2 = TestProbe()
     system.actorOf(Props(classOf[MyPersistentActor], p2.ref, "p4"))
     p2.fishForMessage(max = 2.minute, hint = "next-messages") {
-      case "next-1" => false
-      case "next-2" => false
-      case "next-3" => true
+      case "next-1"   => false
+      case "next-2"   => false
+      case "next-3"   => true
       case b: Boolean => false
-      case n: Long => false
+      case n: Long    => false
     }
   }
 
-//  is assured, but no test yet
+  //  is assured, but no test yet
   it should "don't apply snapshots the same way as messages" in pending
-
 
   def subscribeToDeletion(probe: TestProbe): Unit =
     system.eventStream.subscribe(probe.ref, classOf[FinishedDeletes])

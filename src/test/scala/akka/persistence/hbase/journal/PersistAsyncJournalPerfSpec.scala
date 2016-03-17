@@ -8,10 +8,10 @@ import akka.persistence._
 import akka.persistence.hbase.HBaseClientFactory
 import akka.persistence.hbase.TestingEventProtocol.FinishedDeletes
 import akka.persistence.hbase.snapshot.HBaseSnapshotConfig
-import akka.testkit.{ImplicitSender, TestKit, TestProbe}
+import akka.testkit.{ ImplicitSender, TestKit, TestProbe }
 import com.google.common.base.Stopwatch
-import org.apache.hadoop.hbase.client.{Scan, HTable}
-import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll, FlatSpecLike, Matchers}
+import org.apache.hadoop.hbase.client.{ Scan, HTable }
+import org.scalatest.{ BeforeAndAfter, BeforeAndAfterAll, FlatSpecLike, Matchers }
 
 import scala.collection.JavaConversions
 import scala.concurrent.duration._
@@ -19,7 +19,7 @@ import scala.concurrent.duration._
 object PersistAsyncJournalPerfSpec {
 
   class Writer(untilSeqNr: Long, override val persistenceId: String) extends PersistentActor
-    with ActorLogging {
+      with ActorLogging {
 
     var lastPersisted: Any = _
 
@@ -64,7 +64,7 @@ object PersistAsyncJournalPerfSpec {
 }
 
 class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with FlatSpecLike
-  with ImplicitSender with Matchers with BeforeAndAfterAll with BeforeAndAfter {
+    with ImplicitSender with Matchers with BeforeAndAfterAll with BeforeAndAfter {
 
   import akka.persistence.hbase.journal.PersistAsyncJournalPerfSpec._
 
@@ -78,23 +78,23 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
   val messagesNr = 2000
 
   val messages = (1 to messagesNr) map { i => s"hello-$i-(${new Date})" }
-  
+
   lazy val actor: ActorRef = createActor(messagesNr, "w-1")
 
   override def beforeAll() {
     HBaseJournalInit.createTable(config)
     super.beforeAll()
   }
-  
+
   override def afterAll() {
     super.afterAll()
-    
+
     HBaseJournalInit.disableTable(config, journalConfig.table)
     HBaseJournalInit.deleteTable(config, journalConfig.table)
 
     HBaseJournalInit.disableTable(config, snapshotConfig.snapshotTable)
     HBaseJournalInit.deleteTable(config, snapshotConfig.snapshotTable)
-    
+
     HBaseClientFactory.reset()
     shutdown(system)
   }
@@ -105,10 +105,10 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
 
   it should s"write $messagesNr messages" in {
     val stopwatch = Stopwatch.createStarted()
-    
+
     messages foreach { m => actor ! m }
 
-    messagesNr.times { n => expectMsgType[String](15.seconds) should startWith (s"p-hello-$n") }
+    messagesNr.times { n => expectMsgType[String](15.seconds) should startWith(s"p-hello-$n") }
     stopwatch.stop()
 
     info(s"Sending/persisting $messagesNr messages took: $stopwatch time")
@@ -126,7 +126,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
     p.expectMsgType[RecoveryCompleted](30.seconds)
 
     val last = expectMsgType[String](15.seconds)
-    last should startWith ("hello-")
+    last should startWith("hello-")
   }
 
   it should "delete all messages up until that seq number" in {
@@ -137,7 +137,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
 
     p.expectMsgType[FinishedDeletes](max = 30.seconds)
 
-    countMessages() should equal (0)
+    countMessages() should equal(0)
   }
 
   private def countMessages(): Int = {
@@ -145,7 +145,7 @@ class PersistAsyncJournalPerfSpec extends TestKit(ActorSystem("test")) with Flat
     val scan = new Scan
     val scanner = hTable.getScanner(scan)
     import JavaConversions._
-    val count = scanner.iterator().foldLeft(0) { case (acc, _) => acc + 1}
+    val count = scanner.iterator().foldLeft(0) { case (acc, _) => acc + 1 }
     scanner.close()
     hTable.close()
     count

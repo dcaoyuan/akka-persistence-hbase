@@ -129,13 +129,14 @@ object Dependencies {
     "ch.qos.logback" % "logback-classic" % "1.1.2")
 
   val test = Seq(
+    "com.typesafe.akka" %% "akka-persistence-tck" % AKKA_VERSION % Test,
     "org.scalamock" %% "scalamock-scalatest-support" % "3.2.1" % Test,
     "org.scalatest" %% "scalatest" % "2.2.4" % Test)
 
-  val guava = Seq(
-    "com.google.guava" % "guava" % "18.0")
+//  val guava = Seq(
+//    "com.google.guava" % "guava" % "18.0")
 
-  val basic: Seq[sbt.ModuleID] = akka ++ hadoop ++ hbase ++ log ++ guava ++ test
+  val basic: Seq[sbt.ModuleID] = akka ++ hadoop ++ hbase ++ log ++ test
 
 }
 

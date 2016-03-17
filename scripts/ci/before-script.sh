@@ -1,3 +1,3 @@
 #! /bin/bash
 
-sudo hbase-0.98.3-hadoop1/bin/start-hbase.sh
+sudo hbase-0.98.17-hadoop2/bin/start-hbase.sh

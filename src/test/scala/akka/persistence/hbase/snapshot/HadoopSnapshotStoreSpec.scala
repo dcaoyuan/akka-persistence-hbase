@@ -1,11 +1,12 @@
 package akka.persistence.hbase.snapshot
 
-import akka.actor.{ActorLogging, ActorRef, ActorSystem, Props}
+import akka.actor.{ ActorLogging, ActorRef, ActorSystem, Props }
 import akka.persistence._
-import akka.persistence.hbase.journal.{HBaseClientFactory, HBaseJournalInit, PersistencePluginSettings}
-import akka.testkit.{TestKit, TestProbe}
-import com.typesafe.config.{Config, ConfigFactory}
-import org.scalatest.{BeforeAndAfterAll, DoNotDiscover, FlatSpecLike, Matchers}
+import akka.persistence.hbase.HBaseClientFactory
+import akka.persistence.hbase.journal.{ HBaseJournalInit, HBaseJournalConfig }
+import akka.testkit.{ TestKit, TestProbe }
+import com.typesafe.config.{ Config, ConfigFactory }
+import org.scalatest.{ BeforeAndAfterAll, DoNotDiscover, FlatSpecLike, Matchers }
 
 import scala.concurrent.duration._
 
@@ -42,12 +43,12 @@ object HadoopSnapshotStoreSpec {
 
       case DeleteSnapshot(toSeqNr) =>
         log.info("Delete, snapshot: " + toSeqNr)
-        deleteSnapshot(toSeqNr, System.currentTimeMillis())
+        deleteSnapshot(toSeqNr)
     }
 
     override def receiveCommand = commands orElse snapshots
 
-    override def receiveRecover = receiveCommand  
+    override def receiveRecover = receiveCommand
 
   }
 
@@ -88,7 +89,7 @@ object HadoopSnapshotStoreSpec {
 
       case DeleteSnapshot(toSeqNr) =>
         log.info("Delete, snapshot: " + toSeqNr)
-        deleteSnapshot(toSeqNr, System.currentTimeMillis())
+        deleteSnapshot(toSeqNr)
     }
 
     override def receiveCommand = commands orElse snapshots
@@ -159,7 +160,7 @@ trait HadoopSnapshotBehavior {
       val snap22 = system.actorOf(Props(classOf[LastValueSnapshottingActor], probe2.ref, "snap-2"))
 
       val WasOfferedSnapshot(msg: String) = probe2.expectMsgType[WasOfferedSnapshot](max = 20.seconds)
-      msg should equal ("snap-c")
+      msg should equal("snap-c")
     }
 
     it should "be able to delete a snapshot, so it won't be replayed again" in {
@@ -188,15 +189,14 @@ trait HadoopSnapshotBehavior {
 @DoNotDiscover
 @deprecated("Will be moved outside as separate project")
 class HdfsSnapshotStoreSpec extends TestKit(ActorSystem("hdfs-test")) with FlatSpecLike with Matchers
-  with BeforeAndAfterAll
-  with HadoopSnapshotBehavior {
+    with BeforeAndAfterAll
+    with HadoopSnapshotBehavior {
 
   behavior of "HdfsSnapshotStore"
 
   def config =
     ConfigFactory.parseString("mode = hdfs")
       .withFallback(system.settings.config)
-
 
   override protected def afterAll() {
     super.afterAll()
@@ -207,29 +207,29 @@ class HdfsSnapshotStoreSpec extends TestKit(ActorSystem("hdfs-test")) with FlatS
 
 }
 
-
 class HBaseSnapshotStoreSpec extends TestKit(ActorSystem("hbase-test")) with FlatSpecLike with Matchers
-  with BeforeAndAfterAll
-  with HadoopSnapshotBehavior {
+    with BeforeAndAfterAll
+    with HadoopSnapshotBehavior {
 
   behavior of "HBaseSnapshotStore"
 
-  val pluginSettings = PersistencePluginSettings(config)
+  val journalConfig = new HBaseJournalConfig(config)
+  val snapshotConfig = new HBaseSnapshotConfig(config)
 
   override protected def beforeAll() {
-    HBaseJournalInit.createTable(config, pluginSettings.table, pluginSettings.family)
-    HBaseJournalInit.createTable(config, pluginSettings.snapshotTable, pluginSettings.snapshotFamily)
+    HBaseJournalInit.createTable(config, journalConfig.table, journalConfig.family)
+    HBaseJournalInit.createTable(config, snapshotConfig.snapshotTable, snapshotConfig.snapshotFamily)
     super.beforeAll()
   }
 
   override protected def afterAll() {
     super.afterAll()
 
-    HBaseJournalInit.disableTable(config, pluginSettings.table)
-    HBaseJournalInit.deleteTable(config, pluginSettings.table)
+    HBaseJournalInit.disableTable(config, journalConfig.table)
+    HBaseJournalInit.deleteTable(config, journalConfig.table)
 
-    HBaseJournalInit.disableTable(config, pluginSettings.snapshotTable)
-    HBaseJournalInit.deleteTable(config, pluginSettings.snapshotTable)
+    HBaseJournalInit.disableTable(config, snapshotConfig.snapshotTable)
+    HBaseJournalInit.deleteTable(config, snapshotConfig.snapshotTable)
 
     HBaseClientFactory.reset()
 

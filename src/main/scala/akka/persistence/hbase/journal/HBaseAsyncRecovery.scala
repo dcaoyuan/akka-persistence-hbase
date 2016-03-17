@@ -1,5 +1,6 @@
 package akka.persistence.hbase.journal
 
+import akka.Done
 import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.persistence.PersistentRepr
 import akka.persistence.hbase.Columns
@@ -36,7 +37,7 @@ trait HBaseAsyncRecovery extends AsyncRecovery with ActorLogging {
         "Skipping async replay for persistenceId [{}], from sequenceNr: [{}], to sequenceNr: [{}], since max messages count to replay is 0",
         persistenceId, fromSequenceNr, toSequenceNr)
 
-      Future.successful(()) // no need to do a replay anything
+      Future.successful(Done) // no need to do a replay anything
 
     case _ =>
       log.debug(
